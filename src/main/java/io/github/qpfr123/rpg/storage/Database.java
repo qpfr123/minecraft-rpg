@@ -192,6 +192,22 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /**
+     * 수령 완료: CLAIMING → CLAIMED 전이와 EXP가 반영된 프로필 저장을 한 트랜잭션으로 묶는다.
+     * @return 전이에 성공했는지 여부. 실패하면 프로필도 저장하지 않는다.
+     */
+    public boolean completeClaim(String eventId, UUID recipient, PlayerProfile.Snapshot profile) throws SQLException {
+        boolean[] ok = {false};
+        inTransaction(() -> {
+            if (!transition(eventId, recipient, RewardGrant.Status.CLAIMING, RewardGrant.Status.CLAIMED)) {
+                throw new SQLException("reward not in CLAIMING: " + eventId + " / " + recipient);
+            }
+            saveProfileNoTx(profile);
+            ok[0] = true;
+        });
+        return ok[0];
+    }
+
     /** 수령하지 않은 보상(PENDING, CLAIMING). */
     public List<RewardGrant> openRewards(UUID recipient) throws SQLException {
         return queryRewards("SELECT * FROM reward_ledger WHERE recipient=? AND status<>'CLAIMED' ORDER BY created_at", recipient, -1);

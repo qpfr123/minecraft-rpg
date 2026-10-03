@@ -3,3 +3,17 @@ version: '${version}'
 main: io.github.qpfr123.rpg.RpgPlugin
 api-version: '1.21.11'
 description: Minecraft RPG
+commands:
+  rpg:
+    description: 스탯 확인·배분, 보상 수령
+    usage: /rpg stats | alloc <스탯> <양> | claim
+    permission: minecraftrpg.player
+  rpgadmin:
+    description: RPG 관리자 조회·테스트
+    usage: /rpgadmin profile|ledger <플레이어>, spawn <몹>, backup, level <플레이어> <레벨>, crashtest claim
+    permission: minecraftrpg.admin
+permissions:
+  minecraftrpg.player:
+    default: true
+  minecraftrpg.admin:
+    default: op
