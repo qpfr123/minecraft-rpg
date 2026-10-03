@@ -1,0 +1,270 @@
+package io.github.qpfr123.rpg.storage;
+
+import io.github.qpfr123.rpg.loot.RewardGrant;
+import io.github.qpfr123.rpg.profile.PlayerProfile;
+import io.github.qpfr123.rpg.stat.SecondaryStat;
+import io.github.qpfr123.rpg.stat.StatAllocation;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+/**
+ * SQLite 저장소. 스레드 안전하지 않으므로 {@link DbExecutor}의 단일 스레드에서만 호출한다(테스트는 직접 호출).
+ */
+public final class Database implements AutoCloseable {
+    private final Connection conn;
+
+    public Database(Path file) throws SQLException {
+        try {
+            Files.createDirectories(file.toAbsolutePath().getParent());
+        } catch (java.io.IOException e) {
+            throw new SQLException("cannot create db directory", e);
+        }
+        conn = DriverManager.getConnection("jdbc:sqlite:" + file.toAbsolutePath());
+        try (Statement st = conn.createStatement()) {
+            st.execute("PRAGMA journal_mode=WAL");
+            st.execute("PRAGMA synchronous=FULL");
+            st.execute("PRAGMA foreign_keys=ON");
+            st.execute("PRAGMA busy_timeout=5000");
+        }
+        migrate();
+    }
+
+    private void migrate() throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS profiles (
+                      uuid TEXT PRIMARY KEY,
+                      level INTEGER NOT NULL,
+                      exp INTEGER NOT NULL,
+                      str INTEGER NOT NULL, agi INTEGER NOT NULL, res INTEGER NOT NULL, vit INTEGER NOT NULL,
+                      foc INTEGER NOT NULL, luk INTEGER NOT NULL, spi INTEGER NOT NULL,
+                      hp REAL NOT NULL, mp REAL NOT NULL, shield REAL NOT NULL,
+                      version INTEGER NOT NULL,
+                      rule_version INTEGER NOT NULL,
+                      updated_at INTEGER NOT NULL)""");
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS reward_ledger (
+                      event_id TEXT NOT NULL,
+                      recipient TEXT NOT NULL,
+                      exp INTEGER NOT NULL,
+                      gear_ids TEXT NOT NULL,
+                      status TEXT NOT NULL CHECK (status IN ('PENDING','CLAIMING','CLAIMED')),
+                      created_at INTEGER NOT NULL,
+                      updated_at INTEGER NOT NULL,
+                      PRIMARY KEY (event_id, recipient))""");
+            st.execute("CREATE INDEX IF NOT EXISTS reward_ledger_recipient ON reward_ledger(recipient, status)");
+        }
+    }
+
+    // ---- profiles ----
+
+    public Optional<PlayerProfile> loadProfile(UUID id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT * FROM profiles WHERE uuid = ?")) {
+            ps.setString(1, id.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                Map<SecondaryStat, Integer> m = new EnumMap<>(SecondaryStat.class);
+                m.put(SecondaryStat.STRENGTH, rs.getInt("str"));
+                m.put(SecondaryStat.AGILITY, rs.getInt("agi"));
+                m.put(SecondaryStat.RESISTANCE, rs.getInt("res"));
+                m.put(SecondaryStat.VITALITY, rs.getInt("vit"));
+                m.put(SecondaryStat.FOCUS, rs.getInt("foc"));
+                m.put(SecondaryStat.LUCK, rs.getInt("luk"));
+                m.put(SecondaryStat.SPIRIT, rs.getInt("spi"));
+                return Optional.of(new PlayerProfile(id, rs.getInt("level"), rs.getLong("exp"), StatAllocation.of(m),
+                        rs.getDouble("hp"), rs.getDouble("mp"), rs.getDouble("shield"), rs.getLong("version")));
+            }
+        }
+    }
+
+    /** @throws StaleVersionException DB의 버전이 기대값과 다를 때. */
+    public void saveProfile(PlayerProfile.Snapshot s) throws SQLException {
+        inTransaction(() -> saveProfileNoTx(s));
+    }
+
+    private void saveProfileNoTx(PlayerProfile.Snapshot s) throws SQLException {
+        long now = System.currentTimeMillis();
+        StatAllocation a = s.allocation();
+        if (s.expectedVersion() == 0) {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO profiles(uuid, level, exp, str, agi, res, vit, foc, luk, spi, hp, mp, shield, version, rule_version, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(uuid) DO NOTHING""")) {
+                ps.setString(1, s.id().toString());
+                ps.setInt(2, s.level());
+                ps.setLong(3, s.exp());
+                bindAllocation(ps, 4, a);
+                ps.setDouble(11, s.hp());
+                ps.setDouble(12, s.mp());
+                ps.setDouble(13, s.shield());
+                ps.setLong(14, s.newVersion());
+                ps.setInt(15, PlayerProfile.RULE_VERSION);
+                ps.setLong(16, now);
+                if (ps.executeUpdate() == 1) return;
+            }
+            throw new StaleVersionException(s.id(), s.expectedVersion());
+        }
+        try (PreparedStatement ps = conn.prepareStatement("""
+                UPDATE profiles SET level=?, exp=?, str=?, agi=?, res=?, vit=?, foc=?, luk=?, spi=?, hp=?, mp=?, shield=?,
+                  version=?, rule_version=?, updated_at=?
+                WHERE uuid=? AND version=?""")) {
+            ps.setInt(1, s.level());
+            ps.setLong(2, s.exp());
+            bindAllocation(ps, 3, a);
+            ps.setDouble(10, s.hp());
+            ps.setDouble(11, s.mp());
+            ps.setDouble(12, s.shield());
+            ps.setLong(13, s.newVersion());
+            ps.setInt(14, PlayerProfile.RULE_VERSION);
+            ps.setLong(15, now);
+            ps.setString(16, s.id().toString());
+            ps.setLong(17, s.expectedVersion());
+            if (ps.executeUpdate() != 1) throw new StaleVersionException(s.id(), s.expectedVersion());
+        }
+    }
+
+    private static void bindAllocation(PreparedStatement ps, int start, StatAllocation a) throws SQLException {
+        SecondaryStat[] order = {SecondaryStat.STRENGTH, SecondaryStat.AGILITY, SecondaryStat.RESISTANCE,
+                SecondaryStat.VITALITY, SecondaryStat.FOCUS, SecondaryStat.LUCK, SecondaryStat.SPIRIT};
+        for (int i = 0; i < order.length; i++) ps.setInt(start + i, a.get(order[i]));
+    }
+
+    // ---- reward ledger ----
+
+    /**
+     * 보상 생성과 수령자 프로필 저장을 한 트랜잭션으로 묶는다. 보상 행이 이미 있으면 전체를 되돌리고 false.
+     * EXP는 프로필 스냅샷에 이미 반영돼 있어야 한다.
+     */
+    public boolean recordReward(RewardGrant grant, PlayerProfile.Snapshot recipientProfile) throws SQLException {
+        try {
+            inTransaction(() -> {
+                insertReward(grant);
+                if (recipientProfile != null) saveProfileNoTx(recipientProfile);
+            });
+            return true;
+        } catch (SQLException e) {
+            if (!isUniqueViolation(e)) throw e;
+            // 중복 보상: 원장은 그대로 두고, 버전 연속성을 위해 프로필만 저장한다.
+            if (recipientProfile != null) saveProfile(recipientProfile);
+            return false;
+        }
+    }
+
+    private void insertReward(RewardGrant g) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO reward_ledger(event_id, recipient, exp, gear_ids, status, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)""")) {
+            ps.setString(1, g.eventId());
+            ps.setString(2, g.recipient().toString());
+            ps.setLong(3, g.exp());
+            ps.setString(4, String.join(",", g.gearIds()));
+            ps.setString(5, g.status().name());
+            ps.setLong(6, g.createdAt());
+            ps.setLong(7, g.createdAt());
+            ps.executeUpdate();
+        }
+    }
+
+    /** 상태 전이. from 상태일 때만 바뀐다. @return 바뀌었는지 여부. */
+    public boolean transition(String eventId, UUID recipient, RewardGrant.Status from, RewardGrant.Status to) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE reward_ledger SET status=?, updated_at=? WHERE event_id=? AND recipient=? AND status=?")) {
+            ps.setString(1, to.name());
+            ps.setLong(2, System.currentTimeMillis());
+            ps.setString(3, eventId);
+            ps.setString(4, recipient.toString());
+            ps.setString(5, from.name());
+            return ps.executeUpdate() == 1;
+        }
+    }
+
+    /** 수령하지 않은 보상(PENDING, CLAIMING). */
+    public List<RewardGrant> openRewards(UUID recipient) throws SQLException {
+        return queryRewards("SELECT * FROM reward_ledger WHERE recipient=? AND status<>'CLAIMED' ORDER BY created_at", recipient, -1);
+    }
+
+    public List<RewardGrant> recentRewards(UUID recipient, int limit) throws SQLException {
+        return queryRewards("SELECT * FROM reward_ledger WHERE recipient=? ORDER BY created_at DESC LIMIT ?", recipient, limit);
+    }
+
+    private List<RewardGrant> queryRewards(String sql, UUID recipient, int limit) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, recipient.toString());
+            if (limit > 0) ps.setInt(2, limit);
+            List<RewardGrant> out = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String gear = rs.getString("gear_ids");
+                    out.add(new RewardGrant(rs.getString("event_id"), UUID.fromString(rs.getString("recipient")),
+                            rs.getLong("exp"), gear.isEmpty() ? List.of() : Arrays.asList(gear.split(",")),
+                            RewardGrant.Status.valueOf(rs.getString("status")), rs.getLong("created_at")));
+                }
+            }
+            return out;
+        }
+    }
+
+    // ---- backup ----
+
+    /** 온라인 백업. 대상 파일이 이미 있으면 실패한다. */
+    public void backupTo(Path target) throws SQLException {
+        try {
+            Files.createDirectories(target.toAbsolutePath().getParent());
+        } catch (java.io.IOException e) {
+            throw new SQLException("cannot create backup directory", e);
+        }
+        try (PreparedStatement ps = conn.prepareStatement("VACUUM INTO ?")) {
+            ps.setString(1, target.toAbsolutePath().toString());
+            ps.execute();
+        }
+    }
+
+    // ---- helpers ----
+
+    @FunctionalInterface
+    private interface SqlWork { void run() throws SQLException; }
+
+    private void inTransaction(SqlWork work) throws SQLException {
+        boolean auto = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            work.run();
+            conn.commit();
+        } catch (SQLException | RuntimeException e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(auto);
+        }
+    }
+
+    private static boolean isUniqueViolation(SQLException e) {
+        String msg = String.valueOf(e.getMessage());
+        return msg.contains("UNIQUE constraint failed") || msg.contains("PRIMARY KEY");
+    }
+
+    @Override
+    public void close() throws SQLException {
+        conn.close();
+    }
+
+    public static final class StaleVersionException extends SQLException {
+        public StaleVersionException(UUID id, long expected) {
+            super("stale profile version for " + id + " (expected " + expected + ")");
+        }
+    }
+}

@@ -23,6 +23,7 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.13.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testRuntimeOnly("org.xerial:sqlite-jdbc:3.49.1.0") // Paper 1.21.11에 번들된 버전과 동일
 }
 
 tasks.withType<JavaCompile>().configureEach {
