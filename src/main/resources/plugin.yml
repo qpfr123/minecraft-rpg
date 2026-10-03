@@ -1,0 +1,5 @@
+name: MinecraftRPG
+version: '${version}'
+main: io.github.qpfr123.rpg.RpgPlugin
+api-version: '1.21.11'
+description: Minecraft RPG
