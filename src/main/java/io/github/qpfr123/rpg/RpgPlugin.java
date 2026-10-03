@@ -6,11 +6,12 @@ import io.github.qpfr123.rpg.loot.GearRegistry;
 import io.github.qpfr123.rpg.loot.LootRoller;
 import io.github.qpfr123.rpg.mob.MobRegistry;
 import io.github.qpfr123.rpg.dungeon.DungeonDefinition;
-import io.github.qpfr123.rpg.dungeon.DungeonRegistry;
 import io.github.qpfr123.rpg.dungeon.InstanceTracker;
 import io.github.qpfr123.rpg.party.PartyService;
 import io.github.qpfr123.rpg.paper.BackupService;
 import io.github.qpfr123.rpg.paper.DungeonCommand;
+import io.github.qpfr123.rpg.paper.DungeonEditor;
+import io.github.qpfr123.rpg.paper.DungeonStore;
 import io.github.qpfr123.rpg.paper.DungeonService;
 import io.github.qpfr123.rpg.paper.DungeonTemplates;
 import io.github.qpfr123.rpg.paper.ClaimLockListener;
@@ -45,6 +46,7 @@ public final class RpgPlugin extends JavaPlugin {
     private ProfileService profiles;
     private BackupService backups;
     private DungeonService dungeons;
+    private DungeonEditor editor;
 
     @Override
     public void onEnable() {
@@ -85,9 +87,13 @@ public final class RpgPlugin extends JavaPlugin {
 
         // 던전(슬라이스 2)
         PartyService parties = new PartyService();
-        dungeons = new DungeonService(this, DungeonRegistry.slice2(), new InstanceTracker(4, 120_000, 30_000), db, mobs,
+        DungeonStore dungeonStore = new DungeonStore(getDataFolder(), getLogger());
+        DungeonEditor.recoverInterruptedSaves(dungeonStore.dir(), getLogger()); // 정의를 읽기 전에 중단된 저장을 정리
+        dungeons = new DungeonService(this, dungeonStore.loadAll(), new InstanceTracker(4, 120_000, 30_000), db, mobs,
                 rewards, parties, main, getLogger());
         dungeons.cleanupLeftovers();
+        editor = new DungeonEditor(dungeonStore, dungeons, mobs.registry(), db, main, getLogger());
+        editor.cleanupLeftovers();
         DungeonTemplates templates = new DungeonTemplates(getLogger());
         for (DungeonDefinition d : dungeons.registry().all()) {
             try {
@@ -97,8 +103,10 @@ public final class RpgPlugin extends JavaPlugin {
             }
         }
         getServer().getPluginManager().registerEvents(dungeons, this);
+        getServer().getPluginManager().registerEvents(editor, this);
         combatListener.addKillListener(dungeons::onMobKilled);
         admin.setDungeons(dungeons);
+        admin.setEditor(editor);
         DungeonCommand dungeonCommand = new DungeonCommand(dungeons, parties);
         for (String name : new String[] {"dungeon", "party"}) {
             Objects.requireNonNull(getCommand(name)).setExecutor(dungeonCommand);
@@ -130,6 +138,7 @@ public final class RpgPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (editor != null) editor.shutdown(); // 저장하지 않은 편집은 버린다
         if (dungeons != null) dungeons.shutdown(); // 안에 있는 플레이어를 먼저 돌려보낸 뒤 저장
         if (profiles != null) profiles.saveAll();
         if (db != null) db.shutdown(); // 대기 중인 쓰기를 모두 끝낸 뒤 닫는다

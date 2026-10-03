@@ -37,6 +37,12 @@ public final class RpgAdminCommand implements TabExecutor {
         this.dungeons = dungeons;
     }
 
+    private DungeonEditor editor;
+
+    public void setEditor(DungeonEditor editor) {
+        this.editor = editor;
+    }
+
     public RpgAdminCommand(ProfileService profiles, MobService mobs, RewardService rewards, BackupService backups,
                            DbExecutor db, MainThread main, io.github.qpfr123.rpg.loot.GearRegistry gearRegistry, GearItems gearItems) {
         this.gearRegistry = gearRegistry;
@@ -75,7 +81,8 @@ public final class RpgAdminCommand implements TabExecutor {
             case "testgrant" -> testGrant(sender, args);
             case "dbfail" -> dbFail(sender, args);
             case "dungeon" -> dungeonAdmin(sender, args);
-            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave> · testgrant <플레이어> <EXP> [장비...] · dbfail <지점> <횟수>");
+            case "dungeonedit" -> { if (editor != null) editor.handle(sender, args); }
+            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave> · testgrant <플레이어> <EXP> [장비...] · dbfail <지점> <횟수> · dungeonedit");
         }
         return true;
     }
@@ -293,7 +300,8 @@ public final class RpgAdminCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear", "testgrant", "dbfail", "dungeon"), args[0]);
+        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear", "testgrant", "dbfail", "dungeon", "dungeonedit"), args[0]);
+        if (args.length >= 2 && args[0].equalsIgnoreCase("dungeonedit") && editor != null) return editor.tabComplete(args);
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
             List<String> ids = new ArrayList<>();
             mobs.registry().all().forEach(m -> ids.add(m.id()));

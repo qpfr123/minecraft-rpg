@@ -2,6 +2,7 @@ package io.github.qpfr123.rpg.paper;
 
 import io.github.qpfr123.rpg.dungeon.DungeonDefinition;
 import io.github.qpfr123.rpg.dungeon.DungeonRegistry;
+import io.github.qpfr123.rpg.dungeon.DungeonValidator;
 import io.github.qpfr123.rpg.dungeon.InstanceTracker;
 import io.github.qpfr123.rpg.dungeon.InstanceTracker.Instance;
 import io.github.qpfr123.rpg.mob.MobStatProfile;
@@ -82,6 +83,21 @@ public final class DungeonService implements Listener {
         return db.submit("load session", d -> d.loadDungeonSession(player));
     }
 
+    /**
+     * 인스턴스별로 입장 순간의 던전 정의를 고정한다. 진행 중에 편집기로 저장해도
+     * 보스 판정·클리어 보상·리스폰 입구는 그 인스턴스를 만든 정의(=복사한 맵)를 따른다.
+     */
+    private final Map<String, DungeonDefinition> pinned = new HashMap<>();
+
+    private Optional<DungeonDefinition> definitionOf(Instance inst) {
+        return Optional.ofNullable(pinned.get(inst.id()));
+    }
+
+    private void forgetInstance(String instanceId) {
+        tracker.remove(instanceId);
+        pinned.remove(instanceId);
+    }
+
     /** 접속 중인 플레이어의 귀환 위치(입장 기록의 메모리 사본). */
     private final Map<UUID, DungeonSession> sessions = new HashMap<>();
 
@@ -104,6 +120,14 @@ public final class DungeonService implements Listener {
 
     public DungeonRegistry registry() {
         return registry;
+    }
+
+    /** 템플릿 폴더를 복사 중인(준비 중) 인스턴스가 있으면 템플릿을 교체하면 안 된다. */
+    public boolean hasCreatingInstance(String dungeonId) {
+        for (Instance i : tracker.all()) {
+            if (i.dungeonId().equals(dungeonId) && i.state() == InstanceTracker.State.CREATING) return true;
+        }
+        return false;
     }
 
     public static String worldName(String instanceId) {
@@ -129,6 +153,16 @@ public final class DungeonService implements Listener {
         DungeonDefinition def = registry.get(dungeonId).orElse(null);
         if (def == null) {
             leader.sendMessage(Component.text("알 수 없는 던전: " + dungeonId, NamedTextColor.RED));
+            return;
+        }
+        List<String> problems = DungeonValidator.validate(def, mobs.registry());
+        if (!problems.isEmpty()) {
+            log.warning("dungeon " + def.id() + " is not playable: " + problems);
+            leader.sendMessage(Component.text("이 던전은 설정이 완성되지 않아 입장할 수 없습니다.", NamedTextColor.RED));
+            return;
+        }
+        if (!Files.isDirectory(DungeonTemplates.worldFolder(def.templateWorldName()))) {
+            leader.sendMessage(Component.text("이 던전의 맵이 준비되지 않았습니다.", NamedTextColor.RED));
             return;
         }
         List<Player> group = new ArrayList<>();
@@ -169,6 +203,7 @@ public final class DungeonService implements Listener {
             case OK -> { }
         }
         Instance inst = tracker.create(instanceId, def.id(), ids, def.maxPlayers()).orElseThrow();
+        pinned.put(instanceId, def);
         List<DungeonSession> rows = new ArrayList<>();
         for (Player p : group) {
             Location l = p.getLocation();
@@ -229,7 +264,7 @@ public final class DungeonService implements Listener {
     }
 
     private void abortCreate(Instance inst, List<DungeonSession> rows) {
-        tracker.remove(inst.id());
+        forgetInstance(inst.id());
         for (DungeonSession row : rows) {
             db.submit("abort session", d -> {
                 d.deleteDungeonSession(row.player(), inst.id());
@@ -247,7 +282,7 @@ public final class DungeonService implements Listener {
 
     private void spawnMobs(World world, DungeonDefinition def) {
         List<DungeonDefinition.MobSpawn> all = new ArrayList<>(def.spawns());
-        all.add(def.boss());
+        if (def.boss() != null) all.add(def.boss());
         for (DungeonDefinition.MobSpawn s : all) {
             MobStatProfile profile = mobs.registry().get(s.mobId()).orElse(null);
             if (profile == null) {
@@ -365,7 +400,7 @@ public final class DungeonService implements Listener {
             } catch (IOException e) {
                 log.log(Level.WARNING, "cannot delete instance folder " + folder, e);
             }
-        }).whenComplete((v, e) -> main.nextTick(() -> tracker.remove(inst.id())));
+        }).whenComplete((v, e) -> main.nextTick(() -> forgetInstance(inst.id())));
         log.info("dungeon instance " + inst.id() + " closed");
     }
 
@@ -389,7 +424,7 @@ public final class DungeonService implements Listener {
             } catch (IOException e) {
                 log.log(Level.WARNING, "cannot delete instance folder on shutdown", e);
             }
-            tracker.remove(inst.id());
+            forgetInstance(inst.id());
         }
     }
 
@@ -399,8 +434,8 @@ public final class DungeonService implements Listener {
     public void onMobKilled(LivingEntity mob, MobStatProfile profile) {
         Optional<Instance> inst = instanceOfWorld(mob.getWorld());
         if (inst.isEmpty()) return;
-        DungeonDefinition def = registry.get(inst.get().dungeonId()).orElse(null);
-        if (def == null || !def.boss().mobId().equals(profile.id())) return;
+        DungeonDefinition def = definitionOf(inst.get()).orElse(null);
+        if (def == null || def.boss() == null || !def.boss().mobId().equals(profile.id())) return;
         long now = System.currentTimeMillis();
         if (!tracker.markCleared(inst.get().id(), now)) return;
         String eventId = "dungeon:" + inst.get().id() + ":clear";
@@ -451,7 +486,7 @@ public final class DungeonService implements Listener {
         Player player = event.getPlayer();
         tracker.instanceOf(player.getUniqueId()).ifPresent(inst -> {
             World w = Bukkit.getWorld(worldName(inst.id()));
-            DungeonDefinition def = registry.get(inst.dungeonId()).orElse(null);
+            DungeonDefinition def = definitionOf(inst).orElse(null);
             if (w != null && def != null) event.setRespawnLocation(entrance(w, def));
         });
     }

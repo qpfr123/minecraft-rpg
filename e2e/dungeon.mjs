@@ -34,12 +34,21 @@ async function dungeonList() {
 }
 
 // @e는 차원을 가리지 않으므로 distance로 해당 인스턴스 월드에 한정한다.
+// 플레이어에게서 먼(시야 밖) 청크의 몹은 언로드돼 @e에 안 잡힌다. 세기 전에 던전 전체를 강제 로드한다.
+const loaded = new Set();
+async function loadAll(world) {
+  if (loaded.has(world)) return;
+  loaded.add(world);
+  server.cmd(`execute in minecraft:${world} run forceload add -32 -16 32 112`);
+  await sleep(1500);
+}
 async function count(world, type) {
+  await loadAll(world);
   const line = await server.query(`execute in minecraft:${world} positioned 0 64 30 if entity @e[type=${type},distance=..200]`, /Test (passed|failed)/);
   const m = line.match(/[Cc]ount: (\d+)/);
   return m ? +m[1] : 0;
 }
-const killIn = (world, type) => server.cmd(`execute in minecraft:${world} positioned 0 64 30 run kill @e[type=${type},distance=..200]`);
+const killIn = async (world, type) => { await loadAll(world); server.cmd(`execute in minecraft:${world} positioned 0 64 30 run kill @e[type=${type},distance=..200]`); };
 
 async function ledger(name) {
   const lines = await server.collect(`rpgadmin ledger ${name}`, 1200);
@@ -103,12 +112,12 @@ async function main() {
   await sleep(1500);
   let list = await dungeonList();
   const i1 = list.instances[0];
-  check('솔로 입장: 인스턴스 생성·입구로 이동', /입장했습니다/.test(msg) && list.open === 1 && i1?.members.join() === 'bot_a' && near(a, 0.5, 64, 2.5),
+  check('솔로 입장: 인스턴스 생성·입구로 이동', /입장했습니다/.test(msg) && list.open === 1 && i1?.members.join() === 'bot_a' && near(a, 0.5, 64, -3.5),
     `${msg} open=${list.open} pos=${pos(a)}`);
   const z1 = await count(i1.world, 'zombie');
   const s1 = await count(i1.world, 'skeleton');
   const w1 = await count(i1.world, 'wither_skeleton');
-  check('던전 몹 배치: 구울 5, 해골 궁수 2, 보스 1', z1 === 5 && s1 === 2 && w1 === 1, `zombie=${z1} skeleton=${s1} wither=${w1}`);
+  check('던전 몹 배치: 구울 6, 해골 궁수 3, 보스 1', z1 === 6 && s1 === 3 && w1 === 1, `zombie=${z1} skeleton=${s1} wither=${w1}`);
 
   // 3. 동시 인스턴스 상한
   msg = await enterSolo(b);
@@ -122,11 +131,11 @@ async function main() {
   check('상한 2: 두 번째 인스턴스 생성, 서로 다른 월드', /입장했습니다/.test(msg) && list.open === 2 && i2 && i2.world !== i1.world, msg);
 
   // 4. 인스턴스 분리: 한쪽 몹을 없애도 다른 쪽은 그대로
-  killIn(i1.world, 'zombie');
+  await killIn(i1.world, 'zombie');
   await sleep(800);
   const za = await count(i1.world, 'zombie');
   const zb = await count(i2.world, 'zombie');
-  check('인스턴스 분리: 1번 구울 제거가 2번에 영향 없음', za === 0 && zb === 5, `inst1=${za} inst2=${zb}`);
+  check('인스턴스 분리: 1번 구울 제거가 2번에 영향 없음', za === 0 && zb === 6, `inst1=${za} inst2=${zb}`);
 
   // 5. 퇴장 → 원래 위치, 멤버가 없으면 인스턴스 정리
   const fromLeave = b.chatLog.length;
@@ -142,7 +151,7 @@ async function main() {
   await sleep(2000);
   a = await connectBot('bot_a', PORT);
   await sleep(1500);
-  check('재접속(유휴 시간 전): 던전 안으로 복귀', near(a, 0.5, 64, 2.5) && a.chatLog.some((m) => /진행 중인 던전으로 돌아왔습니다/.test(m)), pos(a));
+  check('재접속(유휴 시간 전): 던전 안으로 복귀', near(a, 0.5, 64, -3.5) && a.chatLog.some((m) => /진행 중인 던전으로 돌아왔습니다/.test(m)), pos(a));
 
   // 7. 접속을 끊은 채 유휴 시간 초과 → 인스턴스 정리, 재접속 시 원래 위치
   await quit(a);
@@ -171,25 +180,25 @@ async function main() {
   await sleep(1500);
   list = await dungeonList();
   const ip = list.instances[0];
-  check('파티 입장: 두 사람이 같은 인스턴스', ip && ip.members.length === 2 && near(a, 0.5, 64, 2.5) && near(b, 0.5, 64, 2.5), JSON.stringify(ip));
+  check('파티 입장: 두 사람이 같은 인스턴스', ip && ip.members.length === 2 && near(a, 0.5, 64, -3.5) && near(b, 0.5, 64, -3.5), JSON.stringify(ip));
 
   const deathsBefore = b.deaths;
   server.cmd('kill bot_b');
   await sleep(3000);
   list = await dungeonList();
-  check('던전 안 사망 → 같은 인스턴스 입구에서 리스폰', b.deaths === deathsBefore + 1 && near(b, 0.5, 64, 2.5) && list.instances[0]?.id === ip.id,
+  check('던전 안 사망 → 같은 인스턴스 입구에서 리스폰', b.deaths === deathsBefore + 1 && near(b, 0.5, 64, -3.5) && list.instances[0]?.id === ip.id,
     `deaths ${deathsBefore}→${b.deaths} pos=${pos(b)}`);
   b.chat('/party leave');
   await sleep(800);
   list = await dungeonList();
   check('파티를 떠나도 진행 중인 인스턴스 멤버는 유지', list.instances[0]?.members.length === 2, JSON.stringify(list.instances[0]));
 
-  killIn(ip.world, 'zombie');
-  killIn(ip.world, 'skeleton');
+  await killIn(ip.world, 'zombie');
+  await killIn(ip.world, 'skeleton');
   server.cmd(`execute in minecraft:${ip.world} positioned 0 64 30 run data merge entity @e[type=wither_skeleton,limit=1,distance=..200] {NoAI:1b}`);
   server.cmd(`execute in minecraft:${ip.world} positioned 0 64 30 run damage @e[type=wither_skeleton,limit=1,distance=..200] 18 minecraft:generic`); // 1200 → 120
-  server.cmd(`execute in minecraft:${ip.world} run tp bot_a 0.5 64 55.5 0 0`);
-  server.cmd(`execute in minecraft:${ip.world} run tp bot_b 1.5 64 55.5 0 0`);
+  server.cmd(`execute in minecraft:${ip.world} run tp bot_a 0.5 65 93.5 0 0`);
+  server.cmd(`execute in minecraft:${ip.world} run tp bot_b 1.5 65 93.5 0 0`);
   await sleep(2000);
   const isBoss = (e) => e.name === 'wither_skeleton';
   await Promise.all([hitUntilDead(a, isBoss), (async () => { await sleep(300); await hitUntilDead(b, isBoss); })()]);
@@ -268,7 +277,7 @@ async function main() {
   await waitChat(a, /입장했습니다/, 20_000).catch(() => null);
   await sleep(1500);
   const inside = await session('bot_a');
-  check('[준비 중 재접속] 준비 완료 후 입장, 기록은 그대로', near(a, 0.5, 64, 2.5) && inside === preparing, `pos=${pos(a)} session=${inside}`);
+  check('[준비 중 재접속] 준비 완료 후 입장, 기록은 그대로', near(a, 0.5, 64, -3.5) && inside === preparing, `pos=${pos(a)} session=${inside}`);
   server.cmd('rpgadmin dungeon copydelay 0');
   server.cmd('save-all');
   await server.waitFor(/Saved the game/, 15_000);

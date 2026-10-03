@@ -1,6 +1,7 @@
 package io.github.qpfr123.rpg.paper;
 
 import io.github.qpfr123.rpg.dungeon.DungeonDefinition;
+import io.github.qpfr123.rpg.dungeon.DungeonRegistry;
 import org.bukkit.Bukkit;
 import org.bukkit.GameRule;
 import org.bukkit.Location;
@@ -20,7 +21,7 @@ import java.util.stream.Stream;
  * 폴더를 복사해 만든다. 실행 중인 월드 폴더는 복사하지 않는다.
  */
 public final class DungeonTemplates {
-    private static final String MARKER = "rpg_layout_version.txt";
+    static final String MARKER = "rpg_layout_version.txt";
 
     private final Logger log;
 
@@ -32,26 +33,57 @@ public final class DungeonTemplates {
         return Bukkit.getWorldContainer().toPath().resolve(worldName);
     }
 
-    /** 템플릿이 없거나 배치 버전이 다르면 다시 만든다. 메인 스레드(플러그인 활성화 중)에서 호출. */
+    /**
+     * 템플릿 준비. 메인 스레드(플러그인 활성화 중)에서 호출.
+     * <ul>
+     *   <li>코드 생성 던전: 템플릿이 없거나, 생성기가 만든 이전 버전이면 다시 만든다.</li>
+     *   <li>게임 안에서 편집한 템플릿("edited")은 절대 덮어쓰지 않는다.</li>
+     *   <li>직접 제작 던전인데 템플릿이 없으면 빈 발판만 있는 템플릿을 만든다.</li>
+     * </ul>
+     */
     public void ensure(DungeonDefinition def) throws IOException {
         Path folder = worldFolder(def.templateWorldName());
-        Path marker = folder.resolve(MARKER);
-        if (Files.exists(marker) && Files.readString(marker).trim().equals(String.valueOf(def.layoutVersion()))
-                && Bukkit.getWorld(def.templateWorldName()) == null) {
-            return;
-        }
-        World loaded = Bukkit.getWorld(def.templateWorldName());
-        if (loaded != null) Bukkit.unloadWorld(loaded, false);
+        String marker = readMarker(folder);
+        if (Bukkit.getWorld(def.templateWorldName()) != null) return; // 이미 로드돼 있으면 건드리지 않는다
+        boolean exists = Files.isDirectory(folder.resolve("region")) || Files.exists(folder.resolve("level.dat"));
+        if (exists && "edited".equals(marker)) return;
+        if (exists && def.generator() == null) return;
+        if (exists && def.generator() != null && ("generated:" + def.layoutVersion()).equals(marker)) return;
         deleteRecursively(folder);
-        log.info("building dungeon template " + def.templateWorldName() + " (layout v" + def.layoutVersion() + ")");
-        World w = new WorldCreator(def.templateWorldName()).generator(new VoidGenerator()).generateStructures(false).createWorld();
-        if (w == null) throw new IOException("cannot create template world");
-        applyRules(w);
-        if ("crypt".equals(def.id())) buildCrypt(w);
-        w.setSpawnLocation(new Location(w, def.entrance().x(), def.entrance().y(), def.entrance().z(), def.entrance().yaw(), 0));
+        log.info("building dungeon template " + def.templateWorldName()
+                + (def.generator() != null ? " (" + def.generator() + " v" + def.layoutVersion() + ")" : " (blank)"));
+        World w = create(def.templateWorldName());
+        if (DungeonRegistry.CRYPT_GENERATOR.equals(def.generator())) CryptBuilder.build(w);
+        else buildBlankPlatform(w);
+        if (def.entrance() != null) {
+            w.setSpawnLocation(new Location(w, def.entrance().x(), def.entrance().y(), def.entrance().z(), def.entrance().yaw(), 0));
+        }
         w.save();
         if (!Bukkit.unloadWorld(w, true)) throw new IOException("cannot unload template world");
-        Files.writeString(marker, String.valueOf(def.layoutVersion()));
+        writeMarker(folder, def.generator() != null ? "generated:" + def.layoutVersion() : "edited");
+    }
+
+    public static World create(String name) throws IOException {
+        World w = new WorldCreator(name).generator(new VoidGenerator()).generateStructures(false).createWorld();
+        if (w == null) throw new IOException("cannot create world " + name);
+        applyRules(w);
+        return w;
+    }
+
+    /** 새 던전용: 원점 주변 9x9 돌 발판. */
+    static void buildBlankPlatform(World w) {
+        for (int x = -4; x <= 4; x++) for (int z = -4; z <= 4; z++) w.getBlockAt(x, 63, z).setType(Material.STONE_BRICKS, false);
+    }
+
+    public static String readMarker(Path folder) throws IOException {
+        Path m = folder.resolve(MARKER);
+        if (!Files.exists(m)) return null;
+        String v = Files.readString(m).trim();
+        return v.matches("\\d+") ? "generated:" + v : v; // 예전 형식(숫자만)
+    }
+
+    public static void writeMarker(Path folder, String value) throws IOException {
+        Files.writeString(folder.resolve(MARKER), value);
     }
 
     public static void applyRules(World w) {
@@ -60,27 +92,6 @@ public final class DungeonTemplates {
         w.setGameRule(GameRule.DO_WEATHER_CYCLE, false);
         w.setTime(18000);
         w.setStorm(false);
-    }
-
-    /** 지하 납골당: 폭 13, 길이 65의 닫힌 회랑. 바닥 y=63, 천장 y=70. */
-    private static void buildCrypt(World w) {
-        for (int x = -7; x <= 7; x++) {
-            for (int z = -3; z <= 63; z++) {
-                boolean wall = x == -7 || x == 7 || z == -3 || z == 63;
-                w.getBlockAt(x, 63, z).setType(Material.STONE_BRICKS, false);
-                w.getBlockAt(x, 70, z).setType((x % 6 == 0 && z % 6 == 0) ? Material.GLOWSTONE : Material.DEEPSLATE_BRICKS, false);
-                for (int y = 64; y <= 69; y++) {
-                    w.getBlockAt(x, y, z).setType(wall ? Material.DEEPSLATE_BRICKS : Material.AIR, false);
-                }
-            }
-        }
-        // 구역 경계 기둥(통로는 가운데)
-        for (int z : new int[] {12, 26, 40, 52}) {
-            for (int x : new int[] {-6, -5, 5, 6}) {
-                for (int y = 64; y <= 69; y++) w.getBlockAt(x, y, z).setType(Material.POLISHED_BLACKSTONE_BRICKS, false);
-            }
-        }
-        for (int x = -2; x <= 2; x++) w.getBlockAt(x, 63, 58).setType(Material.CHISELED_STONE_BRICKS, false); // 보스 단상
     }
 
     public static void deleteRecursively(Path p) throws IOException {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 슬라이스 1 E2E: 오프라인 모드 테스트 서버(run-e2e, 포트 25599) + mineflayer 봇 2개.
-# 사용: EULA_ACCEPTED=true scripts/e2e.sh [core|dungeon|all]   (기본 all)
+# 사용: EULA_ACCEPTED=true scripts/e2e.sh [core|dungeon|editor|all]   (기본 all)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIR="$ROOT/run-e2e"
@@ -29,6 +29,8 @@ simulation-distance=4
 motd=MinecraftRPG E2E
 PROPS
 (cd "$ROOT/e2e" && npm ci --silent)
+# 테스트 전용 훅(저장 중 강제 종료 등)은 이 JVM 옵션이 있을 때만 켜진다.
+export EXTRA_JVM="${EXTRA_JVM:+$EXTRA_JVM }-Dminecraftrpg.testHooks=true"
 SUITE="${1:-all}"
 status=0
 if [[ "$SUITE" == "core" || "$SUITE" == "all" ]]; then node "$ROOT/e2e/run.mjs" || status=1; fi
@@ -36,4 +38,5 @@ if [[ "$SUITE" == "dungeon" || "$SUITE" == "all" ]]; then
   if [[ "$SUITE" == "all" ]]; then rm -rf "$DIR/world" "$DIR/world_nether" "$DIR/world_the_end" "$DIR/plugins/MinecraftRPG"; fi
   node "$ROOT/e2e/dungeon.mjs" || status=1
 fi
+if [[ "$SUITE" == "editor" || "$SUITE" == "all" ]]; then node "$ROOT/e2e/editor.mjs" || status=1; fi
 exit $status

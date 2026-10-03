@@ -90,6 +90,14 @@ public final class Database implements AutoCloseable {
                       return_world TEXT NOT NULL,
                       x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL, yaw REAL NOT NULL, pitch REAL NOT NULL,
                       created_at INTEGER NOT NULL)""");
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS editor_sessions (
+                      player TEXT PRIMARY KEY,
+                      dungeon_id TEXT NOT NULL,
+                      return_world TEXT NOT NULL,
+                      x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL, yaw REAL NOT NULL, pitch REAL NOT NULL,
+                      game_mode TEXT NOT NULL,
+                      created_at INTEGER NOT NULL)""");
         }
     }
 
@@ -323,6 +331,50 @@ public final class Database implements AutoCloseable {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, player.toString());
             if (instanceId != null) ps.setString(2, instanceId);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 던전 편집 진입 기록: 편집 중 로그아웃·강제 종료돼도 원래 위치·게임 모드로 되돌린다. */
+    public record EditorSession(UUID player, String dungeonId, String returnWorld, double x, double y, double z,
+                                float yaw, float pitch, String gameMode) {}
+
+    public void saveEditorSession(EditorSession s) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                INSERT INTO editor_sessions(player, dungeon_id, return_world, x, y, z, yaw, pitch, game_mode, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(player) DO UPDATE SET dungeon_id=excluded.dungeon_id, return_world=excluded.return_world,
+                  x=excluded.x, y=excluded.y, z=excluded.z, yaw=excluded.yaw, pitch=excluded.pitch,
+                  game_mode=excluded.game_mode, created_at=excluded.created_at""")) {
+            ps.setString(1, s.player().toString());
+            ps.setString(2, s.dungeonId());
+            ps.setString(3, s.returnWorld());
+            ps.setDouble(4, s.x());
+            ps.setDouble(5, s.y());
+            ps.setDouble(6, s.z());
+            ps.setFloat(7, s.yaw());
+            ps.setFloat(8, s.pitch());
+            ps.setString(9, s.gameMode());
+            ps.setLong(10, System.currentTimeMillis());
+            ps.executeUpdate();
+        }
+    }
+
+    public Optional<EditorSession> loadEditorSession(UUID player) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT * FROM editor_sessions WHERE player=?")) {
+            ps.setString(1, player.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(new EditorSession(player, rs.getString("dungeon_id"), rs.getString("return_world"),
+                        rs.getDouble("x"), rs.getDouble("y"), rs.getDouble("z"), rs.getFloat("yaw"), rs.getFloat("pitch"),
+                        rs.getString("game_mode")));
+            }
+        }
+    }
+
+    public void deleteEditorSession(UUID player) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM editor_sessions WHERE player=?")) {
+            ps.setString(1, player.toString());
             ps.executeUpdate();
         }
     }
