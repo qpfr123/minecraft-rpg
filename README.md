@@ -12,7 +12,7 @@ Minecraft RPG 서버용 Paper 플러그인.
 ```bash
 export JAVA_HOME=/path/to/jdk-21
 ./gradlew build                                   # 플러그인 jar와 테스트
-EULA_ACCEPTED=true scripts/run-server.sh --boot-test  # 부팅→활성화→정상 종료 검증
+EULA_ACCEPTED=true scripts/run-server.sh --boot-test  # 부팅→활성화→정상 종료 검증 (BOOT_TIMEOUT 기본 300초, 초과 시 실패)
 EULA_ACCEPTED=true scripts/run-server.sh              # 로컬 테스트 서버 실행 (run/)
 ```
 

@@ -39,11 +39,17 @@ if [[ "${1:-}" == "--boot-test" ]]; then
   "$JAVA" -Xms"$MEMORY" -Xmx"$MEMORY" -jar "$JAR" --nogui < console.fifo > boot-test.log 2>&1 &
   PID=$!
   exec 3> console.fifo
-  for _ in $(seq 1 300); do
-    grep -q "Done (" boot-test.log && break
+  BOOTED=false
+  for _ in $(seq 1 "${BOOT_TIMEOUT:-300}"); do
+    if grep -q "Done (" boot-test.log; then BOOTED=true; break; fi
     kill -0 "$PID" 2>/dev/null || break
     sleep 1
   done
+  if [[ "$BOOTED" != "true" ]]; then
+    kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true
+    exec 3>&-; rm -f console.fifo
+    echo "FAIL: ${BOOT_TIMEOUT:-300}초 안에 부팅 완료(Done) 로그 없음"; tail -20 boot-test.log; exit 1
+  fi
   sleep 5
   echo stop >&3
   for _ in $(seq 1 120); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
