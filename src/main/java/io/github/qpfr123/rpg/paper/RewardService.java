@@ -3,6 +3,7 @@ package io.github.qpfr123.rpg.paper;
 import io.github.qpfr123.rpg.loot.GearDefinition;
 import io.github.qpfr123.rpg.loot.GearRegistry;
 import io.github.qpfr123.rpg.loot.LootRoller;
+import io.github.qpfr123.rpg.loot.LootTable;
 import io.github.qpfr123.rpg.loot.RewardGrant;
 import io.github.qpfr123.rpg.mob.MobStatProfile;
 import io.github.qpfr123.rpg.profile.ExperienceCurve;
@@ -93,20 +94,25 @@ public final class RewardService {
 
     /** 처치 확정 후 수령자별 보상을 굴려 원장에 기록하고, 접속 중이면 바로 수령을 시도한다. */
     public void onKill(UUID mobEntity, MobStatProfile mob, List<UUID> recipients) {
-        String eventId = "kill:" + mobEntity;
-        for (UUID recipient : recipients) {
-            Player player = Bukkit.getPlayer(recipient);
-            double dropBonus = 0;
-            double expBonus = 0;
-            if (player != null && profiles.get(recipient).isPresent()) {
-                StatSnapshot s = profiles.stats(player);
-                dropBonus = s.dropBonus();
-                expBonus = s.expBonus();
-            }
-            List<String> items = roller.roll(mob.loot(), dropBonus);
-            long exp = ExperienceCurve.applyBonus(mob.loot().exp(), expBonus);
-            record(new RewardGrant(eventId, recipient, exp, items, RewardGrant.Status.PENDING, System.currentTimeMillis()), true, true);
+        for (UUID recipient : recipients) grantLoot("kill:" + mobEntity, recipient, mob.loot(), true);
+    }
+
+    /**
+     * 보상표를 수령자의 드롭·EXP 보너스로 굴려 (eventId, 수령자) 단위로 한 번만 기록한다.
+     * 던전 클리어 보상 등 처치 외 보상도 이 경로를 쓴다.
+     */
+    public void grantLoot(String eventId, UUID recipient, LootTable table, boolean fromKill) {
+        Player player = Bukkit.getPlayer(recipient);
+        double dropBonus = 0;
+        double expBonus = 0;
+        if (player != null && profiles.get(recipient).isPresent()) {
+            StatSnapshot s = profiles.stats(player);
+            dropBonus = s.dropBonus();
+            expBonus = s.expBonus();
         }
+        List<String> items = roller.roll(table, dropBonus);
+        long exp = ExperienceCurve.applyBonus(table.exp(), expBonus);
+        record(new RewardGrant(eventId, recipient, exp, items, RewardGrant.Status.PENDING, System.currentTimeMillis()), true, fromKill);
     }
 
     /** 관리자 검증용 보상(이벤트 ID "test:..."). 처치 보상과 같은 경로로 기록·수령한다. */

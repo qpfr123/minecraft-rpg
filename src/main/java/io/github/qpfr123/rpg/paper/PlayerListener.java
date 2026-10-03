@@ -105,6 +105,20 @@ public final class PlayerListener implements Listener {
         });
     }
 
+    /** 사망 페널티(2026-10-03 결정: 보존): RPG 장비·소모품은 떨어지지 않고 그대로 남는다. 바닐라 아이템은 바닐라 규칙. */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onDeathKeepGear(PlayerDeathEvent event) {
+        if (event.getKeepInventory()) return;
+        var it = event.getDrops().iterator();
+        while (it.hasNext()) {
+            ItemStack item = it.next();
+            if (gear.definitionOf(item).isPresent()) {
+                event.getItemsToKeep().add(item);
+                it.remove();
+            }
+        }
+    }
+
     @EventHandler
     public void onRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();

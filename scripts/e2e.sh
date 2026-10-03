@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 슬라이스 1 E2E: 오프라인 모드 테스트 서버(run-e2e, 포트 25599) + mineflayer 봇 2개.
-# 사용: EULA_ACCEPTED=true scripts/e2e.sh
+# 사용: EULA_ACCEPTED=true scripts/e2e.sh [core|dungeon|all]   (기본 all)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIR="$ROOT/run-e2e"
@@ -29,4 +29,11 @@ simulation-distance=4
 motd=MinecraftRPG E2E
 PROPS
 (cd "$ROOT/e2e" && npm ci --silent)
-node "$ROOT/e2e/run.mjs"
+SUITE="${1:-all}"
+status=0
+if [[ "$SUITE" == "core" || "$SUITE" == "all" ]]; then node "$ROOT/e2e/run.mjs" || status=1; fi
+if [[ "$SUITE" == "dungeon" || "$SUITE" == "all" ]]; then
+  if [[ "$SUITE" == "all" ]]; then rm -rf "$DIR/world" "$DIR/world_nether" "$DIR/world_the_end" "$DIR/plugins/MinecraftRPG"; fi
+  node "$ROOT/e2e/dungeon.mjs" || status=1
+fi
+exit $status

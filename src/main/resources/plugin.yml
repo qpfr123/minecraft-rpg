@@ -10,8 +10,16 @@ commands:
     permission: minecraftrpg.player
   rpgadmin:
     description: RPG 관리자 조회·테스트
-    usage: /rpgadmin profile|ledger <플레이어>, spawn <몹> [플레이어], backup, level, givegear, testgrant, dbfail, crashtest
+    usage: /rpgadmin profile|ledger <플레이어>, spawn <몹> [플레이어], backup, level, givegear, testgrant, dbfail, crashtest, dungeon
     permission: minecraftrpg.admin
+  dungeon:
+    description: 던전 입장·퇴장
+    usage: /dungeon enter <던전ID> | leave | list
+    permission: minecraftrpg.player
+  party:
+    description: 파티
+    usage: /party invite <플레이어> | accept | leave | list
+    permission: minecraftrpg.player
 permissions:
   minecraftrpg.player:
     default: true

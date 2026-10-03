@@ -245,7 +245,14 @@ async function main() {
   server.cmd('effect clear bot_b');
   server.cmd('tp bot_b 20.5 -60 0.5 90 0');
   await sleep(3000);
-  const bHp0 = (await profile('bot_b')).hp;
+  // 측정 전 HP를 최대치까지 채운다(최대가 아니면 측정 사이 전투 재생 0.8/초가 섞여 피해량이 흐려진다).
+  let bHp0 = 0;
+  for (let i = 0; i < 40; i++) {
+    const pb = await profile('bot_b');
+    bHp0 = pb.hp;
+    if (bHp0 >= 100) break;
+    await sleep(1000);
+  }
   const archerLine = await server.query('rpgadmin spawn bone_archer bot_b', /소환: .* ([0-9a-f-]{36})/);
   const archer = archerLine.match(/([0-9a-f-]{36})/)[1];
   server.cmd(`tp ${archer} 26.5 -60 0.5`);

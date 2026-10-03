@@ -31,6 +31,11 @@ public final class RpgAdminCommand implements TabExecutor {
     private final MainThread main;
     private final io.github.qpfr123.rpg.loot.GearRegistry gearRegistry;
     private final GearItems gearItems;
+    private DungeonService dungeons;
+
+    public void setDungeons(DungeonService dungeons) {
+        this.dungeons = dungeons;
+    }
 
     public RpgAdminCommand(ProfileService profiles, MobService mobs, RewardService rewards, BackupService backups,
                            DbExecutor db, MainThread main, io.github.qpfr123.rpg.loot.GearRegistry gearRegistry, GearItems gearItems) {
@@ -69,6 +74,7 @@ public final class RpgAdminCommand implements TabExecutor {
             case "givegear" -> giveGear(sender, args);
             case "testgrant" -> testGrant(sender, args);
             case "dbfail" -> dbFail(sender, args);
+            case "dungeon" -> dungeonAdmin(sender, args);
             default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave> · testgrant <플레이어> <EXP> [장비...] · dbfail <지점> <횟수>");
         }
         return true;
@@ -173,6 +179,33 @@ public final class RpgAdminCommand implements TabExecutor {
         sender.sendMessage("[검증] 다음 " + count + "번의 " + point + " 쓰기를 실패시킵니다.");
     }
 
+    /** /rpgadmin dungeon list | cap <n> | idle <초> | exitdelay <초> */
+    private void dungeonAdmin(CommandSender sender, String[] args) {
+        if (dungeons == null) return;
+        var t = dungeons.tracker();
+        String op = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
+        long value;
+        try {
+            value = args.length >= 3 ? Long.parseLong(args[2]) : -1;
+        } catch (NumberFormatException e) {
+            value = -1;
+        }
+        switch (op) {
+            case "cap" -> { if (value > 0) t.configure((int) value, t.idleMillis(), t.exitDelayMillis()); }
+            case "idle" -> { if (value >= 0) t.configure(t.cap(), value * 1000, t.exitDelayMillis()); }
+            case "exitdelay" -> { if (value >= 0) t.configure(t.cap(), t.idleMillis(), value * 1000); }
+            default -> { }
+        }
+        sender.sendMessage("[dungeon] cap=" + t.cap() + " idle=" + t.idleMillis() / 1000 + "s exitdelay=" + t.exitDelayMillis() / 1000
+                + "s open=" + t.openCount());
+        for (var i : t.all()) {
+            List<String> names = new ArrayList<>();
+            for (UUID m : i.members()) names.add(String.valueOf(Bukkit.getOfflinePlayer(m).getName()));
+            sender.sendMessage("[dungeon] instance " + i.id() + " world=" + DungeonService.worldName(i.id()) + " dungeon=" + i.dungeonId()
+                    + " state=" + i.state() + " members=" + names);
+        }
+    }
+
     /** 테스트용 장비 지급. 보상 원장을 거치지 않으므로 관리자 전용이며 로그를 남긴다. */
     private void giveGear(CommandSender sender, String[] args) {
         Player target = args.length >= 3 ? Bukkit.getPlayerExact(args[1]) : null;
@@ -231,7 +264,7 @@ public final class RpgAdminCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear", "testgrant", "dbfail"), args[0]);
+        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear", "testgrant", "dbfail", "dungeon"), args[0]);
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
             List<String> ids = new ArrayList<>();
             mobs.registry().all().forEach(m -> ids.add(m.id()));
@@ -239,6 +272,7 @@ public final class RpgAdminCommand implements TabExecutor {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("crashtest")) return List.of("claim", "claim-nosave");
         if (args.length == 2 && args[0].equalsIgnoreCase("dbfail")) return List.of("save", "record", "transition", "complete");
+        if (args.length == 2 && args[0].equalsIgnoreCase("dungeon")) return List.of("list", "cap", "idle", "exitdelay");
         if (args.length == 2) return null; // 플레이어 이름
         return List.of();
     }

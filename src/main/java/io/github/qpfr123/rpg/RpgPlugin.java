@@ -5,7 +5,14 @@ import io.github.qpfr123.rpg.combat.DamagePipeline;
 import io.github.qpfr123.rpg.loot.GearRegistry;
 import io.github.qpfr123.rpg.loot.LootRoller;
 import io.github.qpfr123.rpg.mob.MobRegistry;
+import io.github.qpfr123.rpg.dungeon.DungeonDefinition;
+import io.github.qpfr123.rpg.dungeon.DungeonRegistry;
+import io.github.qpfr123.rpg.dungeon.InstanceTracker;
+import io.github.qpfr123.rpg.party.PartyService;
 import io.github.qpfr123.rpg.paper.BackupService;
+import io.github.qpfr123.rpg.paper.DungeonCommand;
+import io.github.qpfr123.rpg.paper.DungeonService;
+import io.github.qpfr123.rpg.paper.DungeonTemplates;
 import io.github.qpfr123.rpg.paper.ClaimLockListener;
 import io.github.qpfr123.rpg.paper.SidebarService;
 import io.github.qpfr123.rpg.paper.VanillaGuardListener;
@@ -37,6 +44,7 @@ public final class RpgPlugin extends JavaPlugin {
     private DbExecutor db;
     private ProfileService profiles;
     private BackupService backups;
+    private DungeonService dungeons;
 
     @Override
     public void onEnable() {
@@ -75,6 +83,36 @@ public final class RpgPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("rpgadmin")).setExecutor(admin);
         Objects.requireNonNull(getCommand("rpgadmin")).setTabCompleter(admin);
 
+        // 던전(슬라이스 2)
+        PartyService parties = new PartyService();
+        dungeons = new DungeonService(this, DungeonRegistry.slice2(), new InstanceTracker(4, 120_000, 30_000), db, mobs,
+                rewards, parties, main, getLogger());
+        dungeons.cleanupLeftovers();
+        DungeonTemplates templates = new DungeonTemplates(getLogger());
+        for (DungeonDefinition d : dungeons.registry().all()) {
+            try {
+                templates.ensure(d);
+            } catch (Exception e) {
+                getLogger().log(Level.SEVERE, "cannot prepare dungeon template " + d.id(), e);
+            }
+        }
+        getServer().getPluginManager().registerEvents(dungeons, this);
+        combatListener.addKillListener(dungeons::onMobKilled);
+        admin.setDungeons(dungeons);
+        DungeonCommand dungeonCommand = new DungeonCommand(dungeons, parties);
+        for (String name : new String[] {"dungeon", "party"}) {
+            Objects.requireNonNull(getCommand(name)).setExecutor(dungeonCommand);
+            Objects.requireNonNull(getCommand(name)).setTabCompleter(dungeonCommand);
+        }
+        getServer().getPluginManager().registerEvents(new org.bukkit.event.Listener() {
+            @org.bukkit.event.EventHandler
+            public void onQuit(org.bukkit.event.player.PlayerQuitEvent e) {
+                parties.leave(e.getPlayer().getUniqueId()); // 파티는 메모리 전용: 접속을 끊으면 빠진다
+                dungeons.forgetOnQuit(e.getPlayer().getUniqueId());
+            }
+        }, this);
+        Bukkit.getScheduler().runTaskTimer(this, dungeons::tick, SECOND, SECOND);
+
         Bukkit.getScheduler().runTaskTimer(this, new HudTask(profiles, mobs, display, combat, keys, sidebar), SECOND, SECOND);
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             profiles.saveDirty();
@@ -92,6 +130,7 @@ public final class RpgPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (dungeons != null) dungeons.shutdown(); // 안에 있는 플레이어를 먼저 돌려보낸 뒤 저장
         if (profiles != null) profiles.saveAll();
         if (db != null) db.shutdown(); // 대기 중인 쓰기를 모두 끝낸 뒤 닫는다
         getLogger().info("MinecraftRPG disabled");

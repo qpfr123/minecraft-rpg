@@ -17,7 +17,7 @@ export class Server {
   start() {
     this.lines = [];
     this.exited = false;
-    this.proc = spawn(this.java, ['-Xms1G', '-Xmx2G', '-jar', this.jar, '--nogui'], { cwd: this.dir, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.proc = spawn(this.java, [...(process.env.EXTRA_JVM ? process.env.EXTRA_JVM.split(" ") : []), '-Xms1G', '-Xmx2G', '-jar', this.jar, '--nogui'], { cwd: this.dir, stdio: ['pipe', 'pipe', 'pipe'] });
     this.exit = new Promise((resolve) => this.proc.on('exit', (code, sig) => { this.exited = true; resolve({ code, sig }); }));
     const onData = (buf) => {
       for (const raw of buf.toString().split('\n')) {

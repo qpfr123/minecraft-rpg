@@ -45,6 +45,13 @@ public final class CombatListener implements Listener {
     private final DamagePipeline pipeline;
     private final MainThread main;
     private final Map<UUID, Long> lastBasicAttack = new HashMap<>();
+    /** RPG 몹 처치가 확정될 때(보상 기록 직후) 알림을 받는 쪽. 예: 던전 보스 클리어 판정. */
+    public interface KillListener { void onMobKilled(LivingEntity mob, MobStatProfile profile); }
+    private final java.util.List<KillListener> killListeners = new java.util.ArrayList<>();
+
+    public void addKillListener(KillListener l) {
+        killListeners.add(l);
+    }
 
     public CombatListener(ProfileService profiles, MobService mobs, RewardService rewards, HealthDisplay display,
                           CombatStateTracker combat, DamagePipeline pipeline, MainThread main) {
@@ -160,6 +167,7 @@ public final class CombatListener implements Listener {
                 if (mob.isValid()) mob.setHealth(0);
             });
             rewards.onKill(id, profile, recipients);
+            for (KillListener l : killListeners) l.onMobKilled(mob, profile);
         }
     }
 

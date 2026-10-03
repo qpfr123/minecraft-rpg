@@ -83,6 +83,13 @@ public final class Database implements AutoCloseable {
                       updated_at INTEGER NOT NULL,
                       PRIMARY KEY (event_id, recipient))""");
             st.execute("CREATE INDEX IF NOT EXISTS reward_ledger_recipient ON reward_ledger(recipient, status)");
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS dungeon_sessions (
+                      player TEXT PRIMARY KEY,
+                      instance_id TEXT NOT NULL,
+                      return_world TEXT NOT NULL,
+                      x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL, yaw REAL NOT NULL, pitch REAL NOT NULL,
+                      created_at INTEGER NOT NULL)""");
         }
     }
 
@@ -264,6 +271,59 @@ public final class Database implements AutoCloseable {
                 }
             }
             return out;
+        }
+    }
+
+    // ---- dungeon sessions ----
+
+    /** 던전 입장 기록: 서버가 꺼져도 다음 입장 때 원래 위치로 돌려보낼 수 있게 한다. */
+    public record DungeonSession(UUID player, String instanceId, String returnWorld, double x, double y, double z,
+                                 float yaw, float pitch) {}
+
+    public void saveDungeonSessions(List<DungeonSession> sessions) throws SQLException {
+        inTransaction(() -> {
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO dungeon_sessions(player, instance_id, return_world, x, y, z, yaw, pitch, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(player) DO UPDATE SET instance_id=excluded.instance_id, return_world=excluded.return_world,
+                      x=excluded.x, y=excluded.y, z=excluded.z, yaw=excluded.yaw, pitch=excluded.pitch, created_at=excluded.created_at""")) {
+                long now = System.currentTimeMillis();
+                for (DungeonSession s : sessions) {
+                    ps.setString(1, s.player().toString());
+                    ps.setString(2, s.instanceId());
+                    ps.setString(3, s.returnWorld());
+                    ps.setDouble(4, s.x());
+                    ps.setDouble(5, s.y());
+                    ps.setDouble(6, s.z());
+                    ps.setFloat(7, s.yaw());
+                    ps.setFloat(8, s.pitch());
+                    ps.setLong(9, now);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        });
+    }
+
+    public Optional<DungeonSession> loadDungeonSession(UUID player) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT * FROM dungeon_sessions WHERE player=?")) {
+            ps.setString(1, player.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(new DungeonSession(player, rs.getString("instance_id"), rs.getString("return_world"),
+                        rs.getDouble("x"), rs.getDouble("y"), rs.getDouble("z"), rs.getFloat("yaw"), rs.getFloat("pitch")));
+            }
+        }
+    }
+
+    /** instanceId가 일치할 때만 지운다(그 사이 다른 던전에 들어갔다면 남긴다). null이면 무조건 지운다. */
+    public void deleteDungeonSession(UUID player, String instanceId) throws SQLException {
+        String sql = instanceId == null ? "DELETE FROM dungeon_sessions WHERE player=?"
+                : "DELETE FROM dungeon_sessions WHERE player=? AND instance_id=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, player.toString());
+            if (instanceId != null) ps.setString(2, instanceId);
+            ps.executeUpdate();
         }
     }
 
