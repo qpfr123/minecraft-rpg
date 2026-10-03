@@ -223,9 +223,67 @@ async function main() {
   list = await dungeonList();
   check('재시작 후 열린 인스턴스 없음', list.open === 0);
 
+  // 10. 귀환 직후 강제 종료: 플레이어 데이터 저장 전/후 모두 다음 접속에서 원래 위치로 복구
+  const session = async (name) => {
+    const l = await server.query(`rpgadmin dungeon session ${name}`, /\[dungeon\] session /, 10_000);
+    const m = l.match(/instance=(\w+)/);
+    return m ? m[1] : null;
+  };
+  for (const point of ['after-teleport', 'after-save']) {
+    server.cmd('tp bot_a 0.5 -60 0.5 0 0');
+    await sleep(1000);
+    await enterSolo(a);
+    await sleep(1500);
+    const sid = await session('bot_a');
+    server.cmd(`rpgadmin dungeon crash ${point}`);
+    await sleep(300);
+    a.chat('/dungeon leave');
+    const exit = await Promise.race([server.exit, sleep(15_000).then(() => null)]);
+    await quit(a);
+    check(`[귀환 ${point}] 귀환 도중 강제 종료 발생`, exit && exit.code === 137, JSON.stringify(exit));
+    await server.start();
+    const kept = await session('bot_a');
+    check(`[귀환 ${point}] 재시작 후 귀환 기록 유지`, !!sid && kept === sid, `entered=${sid} kept=${kept}`);
+    a = await connectBot('bot_a', PORT);
+    await sleep(3000);
+    const after = await session('bot_a');
+    check(`[귀환 ${point}] 재접속 시 원래 위치로 복구·기록 삭제`, near(a, 0.5, -60, 0.5) && after === null, `pos=${pos(a)} session=${after}`);
+  }
+
+  // 11. 던전 준비(복사) 중 재접속 → 기록 유지 → 준비 완료 후 입장 → 강제 종료 → 원래 위치 복구
+  server.cmd('tp bot_a 0.5 -60 0.5 0 0');
+  server.cmd('rpgadmin dungeon copydelay 8000');
+  await sleep(1000);
+  a.chat('/dungeon enter crypt');
+  await sleep(1000);
+  const preparing = await session('bot_a');
+  await quit(a);
+  await sleep(1000);
+  a = await connectBot('bot_a', PORT);
+  await sleep(1500);
+  const duringRejoin = await session('bot_a');
+  list = await dungeonList();
+  check('[준비 중 재접속] 인스턴스 준비 중이고 귀환 기록 유지', !!preparing && duringRejoin === preparing && list.instances[0]?.state === 'CREATING',
+    `before=${preparing} after=${duringRejoin} state=${list.instances[0]?.state}`);
+  await waitChat(a, /입장했습니다/, 20_000).catch(() => null);
+  await sleep(1500);
+  const inside = await session('bot_a');
+  check('[준비 중 재접속] 준비 완료 후 입장, 기록은 그대로', near(a, 0.5, 64, 2.5) && inside === preparing, `pos=${pos(a)} session=${inside}`);
+  server.cmd('rpgadmin dungeon copydelay 0');
+  server.cmd('save-all');
+  await server.waitFor(/Saved the game/, 15_000);
+  server.proc.kill('SIGKILL');
+  await server.exit;
+  await quit(a);
+  await server.start();
+  a = await connectBot('bot_a', PORT);
+  await sleep(3000);
+  const finalSession = await session('bot_a');
+  check('[준비 중 재접속] 강제 종료 후 재접속: 원래 위치·기록 삭제', near(a, 0.5, -60, 0.5) && finalSession === null, `pos=${pos(a)} session=${finalSession}`);
+
   await quit(a);
   await server.stop();
-  const severe = server.all.filter((l) => /ERROR|SEVERE/.test(l) && /MinecraftRPG|io\.github\.qpfr123/.test(l));
+  const severe = server.all.filter((l) => /ERROR|SEVERE/.test(l) && /MinecraftRPG|io\.github\.qpfr123/.test(l) && !/crash-test/.test(l));
   check('플러그인 ERROR/SEVERE 로그 없음', severe.length === 0, severe.slice(0, 3).join(' | '));
 }
 

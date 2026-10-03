@@ -194,10 +194,39 @@ public final class RpgAdminCommand implements TabExecutor {
             case "cap" -> { if (value > 0) t.configure((int) value, t.idleMillis(), t.exitDelayMillis()); }
             case "idle" -> { if (value >= 0) t.configure(t.cap(), value * 1000, t.exitDelayMillis()); }
             case "exitdelay" -> { if (value >= 0) t.configure(t.cap(), t.idleMillis(), value * 1000); }
+            case "copydelay" -> { if (value >= 0) dungeons.setCopyDelayMillis(value); }
+            case "crash" -> { // 검증용: 다음 귀환에서 강제 종료
+                String point = args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "";
+                DungeonService.ReturnCrash c = switch (point) {
+                    case "after-teleport" -> DungeonService.ReturnCrash.AFTER_TELEPORT;
+                    case "after-save" -> DungeonService.ReturnCrash.AFTER_SAVE;
+                    default -> null;
+                };
+                if (c == null) {
+                    sender.sendMessage("/rpgadmin dungeon crash <after-teleport|after-save>");
+                } else {
+                    dungeons.armReturnCrash(c);
+                    sender.sendMessage("[dungeon] 다음 귀환에서 강제 종료: " + c);
+                }
+                return;
+            }
+            case "session" -> {
+                OfflinePlayer target = args.length >= 3 ? Bukkit.getOfflinePlayerIfCached(args[2]) : null;
+                if (target == null) {
+                    sender.sendMessage("/rpgadmin dungeon session <플레이어>");
+                    return;
+                }
+                String name = args[2];
+                main.then(dungeons.loadSession(target.getUniqueId()), row -> sender.sendMessage(row.map(r ->
+                        "[dungeon] session " + name + " instance=" + r.instanceId() + " return=" + r.returnWorld() + " "
+                                + String.format(Locale.ROOT, "%.1f,%.1f,%.1f", r.x(), r.y(), r.z()))
+                        .orElse("[dungeon] session " + name + " none")));
+                return;
+            }
             default -> { }
         }
         sender.sendMessage("[dungeon] cap=" + t.cap() + " idle=" + t.idleMillis() / 1000 + "s exitdelay=" + t.exitDelayMillis() / 1000
-                + "s open=" + t.openCount());
+                + "s copydelay=" + dungeons.copyDelayMillis() + "ms open=" + t.openCount());
         for (var i : t.all()) {
             List<String> names = new ArrayList<>();
             for (UUID m : i.members()) names.add(String.valueOf(Bukkit.getOfflinePlayer(m).getName()));
@@ -272,7 +301,7 @@ public final class RpgAdminCommand implements TabExecutor {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("crashtest")) return List.of("claim", "claim-nosave");
         if (args.length == 2 && args[0].equalsIgnoreCase("dbfail")) return List.of("save", "record", "transition", "complete");
-        if (args.length == 2 && args[0].equalsIgnoreCase("dungeon")) return List.of("list", "cap", "idle", "exitdelay");
+        if (args.length == 2 && args[0].equalsIgnoreCase("dungeon")) return List.of("list", "cap", "idle", "exitdelay", "copydelay", "crash", "session");
         if (args.length == 2) return null; // 플레이어 이름
         return List.of();
     }

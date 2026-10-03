@@ -59,6 +59,29 @@ public final class DungeonService implements Listener {
     private final PartyService parties;
     private final MainThread main;
     private final Logger log;
+    /** 검증용 강제 종료 지점(귀환 직후 서버가 꺼지는 경우). */
+    public enum ReturnCrash { NONE, AFTER_TELEPORT, AFTER_SAVE }
+
+    private volatile ReturnCrash returnCrash = ReturnCrash.NONE;
+    /** 검증용: 템플릿 복사를 일부러 늦춘다(준비 중 재접속 재현). */
+    private volatile long copyDelayMillis;
+
+    public void armReturnCrash(ReturnCrash point) {
+        returnCrash = point;
+    }
+
+    public void setCopyDelayMillis(long ms) {
+        copyDelayMillis = Math.max(0, ms);
+    }
+
+    public long copyDelayMillis() {
+        return copyDelayMillis;
+    }
+
+    public CompletableFuture<Optional<DungeonSession>> loadSession(UUID player) {
+        return db.submit("load session", d -> d.loadDungeonSession(player));
+    }
+
     /** 접속 중인 플레이어의 귀환 위치(입장 기록의 메모리 사본). */
     private final Map<UUID, DungeonSession> sessions = new HashMap<>();
 
@@ -159,7 +182,11 @@ public final class DungeonService implements Listener {
             return null;
         }).thenRunAsync(() -> {
             try {
+                if (copyDelayMillis > 0) Thread.sleep(copyDelayMillis);
                 DungeonTemplates.copyTemplate(from, to);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new java.util.concurrent.CompletionException(e);
             } catch (IOException e) {
                 throw new java.util.concurrent.CompletionException(e);
             }
@@ -188,9 +215,13 @@ public final class DungeonService implements Listener {
             Location entrance = entrance(world, def);
             for (DungeonSession row : rows) {
                 Player p = Bukkit.getPlayer(row.player());
-                if (p == null) continue; // 준비 중 나감: 다음 접속 때 입장 기록으로 귀환 처리
+                // 준비 중 나갔으면 건너뛴다(입장 기록은 남아 다음 접속 때 귀환). 준비 중 재접속했어도 기록은 유지돼 있다.
+                if (p == null || !inst.isMember(row.player()) || isInstanceWorld(p.getWorld())) continue;
                 sessions.put(row.player(), row);
-                p.teleport(entrance);
+                if (!p.teleport(entrance)) {
+                    log.warning("cannot teleport " + p.getName() + " into instance " + instanceId);
+                    continue;
+                }
                 p.sendMessage(Component.text(def.displayName() + "에 입장했습니다. 나가려면 /dungeon leave", NamedTextColor.GOLD));
             }
             log.info("dungeon instance " + instanceId + " (" + def.id() + ") opened for " + rows.size() + " player(s)");
@@ -249,27 +280,47 @@ public final class DungeonService implements Listener {
     private void returnPlayer(Player player, String instanceId) {
         DungeonSession s = sessions.remove(player.getUniqueId());
         if (s != null) {
-            teleportBack(player, s);
-            deleteSession(player.getUniqueId(), instanceId);
+            returnAndForget(player, s);
             return;
         }
-        main.then(db.submit("load session", d -> d.loadDungeonSession(player.getUniqueId())), row -> {
+        main.then(loadSession(player.getUniqueId()), row -> {
             if (!player.isOnline()) return;
             if (row.isPresent()) {
-                teleportBack(player, row.get());
-                deleteSession(player.getUniqueId(), row.get().instanceId());
+                returnAndForget(player, row.get());
             } else {
                 player.teleport(Bukkit.getWorlds().getFirst().getSpawnLocation());
             }
         });
     }
 
-    private void teleportBack(Player player, DungeonSession s) {
+    /**
+     * 귀환 순서: 텔레포트 → 플레이어 데이터 저장(귀환 위치 영속화) → 입장 기록 삭제.
+     * 텔레포트가 실패하면 기록을 남긴다. 저장 전에 서버가 꺼져도 기록이 남아 다음 접속 때 다시 귀환시킨다.
+     */
+    private void returnAndForget(Player player, DungeonSession s) {
+        if (!teleportBack(player, s)) {
+            log.warning("return teleport failed for " + player.getName() + ", keeping dungeon session " + s.instanceId());
+            return;
+        }
+        haltIf(ReturnCrash.AFTER_TELEPORT, player);
+        player.saveData();
+        haltIf(ReturnCrash.AFTER_SAVE, player);
+        deleteSession(player.getUniqueId(), s.instanceId());
+    }
+
+    private void haltIf(ReturnCrash point, Player player) {
+        if (returnCrash != point) return;
+        log.severe("[crash-test] halting at dungeon return " + point + " for " + player.getName());
+        Runtime.getRuntime().halt(137);
+    }
+
+    private boolean teleportBack(Player player, DungeonSession s) {
         World w = Bukkit.getWorld(s.returnWorld());
         Location to = w == null ? Bukkit.getWorlds().getFirst().getSpawnLocation()
                 : new Location(w, s.x(), s.y(), s.z(), s.yaw(), s.pitch());
-        player.teleport(to);
-        player.sendMessage(Component.text("던전에서 나왔습니다.", NamedTextColor.GRAY));
+        boolean ok = player.teleport(to);
+        if (ok) player.sendMessage(Component.text("던전에서 나왔습니다.", NamedTextColor.GRAY));
+        return ok;
     }
 
     private void deleteSession(UUID player, String instanceId) {
@@ -326,8 +377,7 @@ public final class DungeonService implements Listener {
                 for (Player p : new ArrayList<>(w.getPlayers())) {
                     DungeonSession s = sessions.remove(p.getUniqueId());
                     if (s != null) {
-                        teleportBack(p, s);
-                        deleteSession(p.getUniqueId(), inst.id());
+                        returnAndForget(p, s);
                     } else {
                         p.teleport(Bukkit.getWorlds().getFirst().getSpawnLocation());
                     }
@@ -377,6 +427,11 @@ public final class DungeonService implements Listener {
             }
             DungeonSession s = row.get();
             Optional<Instance> inst = tracker.get(s.instanceId());
+            if (inst.isPresent() && inst.get().state() == InstanceTracker.State.CREATING && inst.get().isMember(player.getUniqueId())) {
+                // 준비 중 재접속: 기록을 유지한다. 준비가 끝나면 생성 콜백이 입장시킨다.
+                player.sendMessage(Component.text("던전을 준비하고 있습니다...", NamedTextColor.GRAY));
+                return;
+            }
             boolean stillInside = inst.isPresent() && inst.get().state() != InstanceTracker.State.CLOSING
                     && inst.get().isMember(player.getUniqueId())
                     && player.getWorld().getName().equals(worldName(s.instanceId()));
@@ -385,8 +440,7 @@ public final class DungeonService implements Listener {
                 player.sendMessage(Component.text("진행 중인 던전으로 돌아왔습니다.", NamedTextColor.GOLD));
             } else {
                 log.info("returning " + player.getName() + " from closed dungeon instance " + s.instanceId());
-                teleportBack(player, s);
-                deleteSession(player.getUniqueId(), s.instanceId());
+                returnAndForget(player, s);
             }
         });
     }
