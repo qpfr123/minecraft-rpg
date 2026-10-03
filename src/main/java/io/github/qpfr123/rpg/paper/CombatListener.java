@@ -53,8 +53,11 @@ public final class CombatListener implements Listener {
         killListeners.add(l);
     }
 
+    private final HudRenderer hud;
+
     public CombatListener(ProfileService profiles, MobService mobs, RewardService rewards, HealthDisplay display,
-                          CombatStateTracker combat, DamagePipeline pipeline, MainThread main) {
+                          CombatStateTracker combat, DamagePipeline pipeline, MainThread main, HudRenderer hud) {
+        this.hud = hud;
         this.profiles = profiles;
         this.mobs = mobs;
         this.rewards = rewards;
@@ -156,8 +159,7 @@ public final class CombatListener implements Listener {
             if (r.attackerHeal() > 0) heal(attacker, r.attackerHeal());
             Player hitter = attacker;
             main.nextTick(() -> mob.setNoDamageTicks(0)); // 공격 속도가 바닐라 무적 시간에 막히지 않게
-            if (r.critical()) hitter.sendActionBar(net.kyori.adventure.text.Component.text("치명타! " + Math.round(r.hpDamage()),
-                    net.kyori.adventure.text.format.NamedTextColor.GOLD));
+            if (r.critical()) hud.notice(hitter, "치명타! " + Math.round(r.hpDamage()), 0xFFAA00);
         }
 
         if (r.lethal()) {

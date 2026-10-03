@@ -39,9 +39,12 @@ public final class PlayerListener implements Listener {
     private final MainThread main;
     private final SidebarService sidebar;
 
+    private final HudRenderer hud;
+
     public PlayerListener(ProfileService profiles, RewardService rewards, MobService mobs, GearItems gear,
                           HealthDisplay display, CombatStateTracker combat, CombatListener combatListener, MainThread main,
-                          SidebarService sidebar) {
+                          SidebarService sidebar, HudRenderer hud) {
+        this.hud = hud;
         this.sidebar = sidebar;
         this.profiles = profiles;
         this.rewards = rewards;
@@ -144,7 +147,7 @@ public final class PlayerListener implements Listener {
         event.setCancelled(true);
         Player player = event.getPlayer();
         if (gear.isLocked(item)) {
-            player.sendActionBar(Component.text("보상 확정 중인 아이템은 아직 쓸 수 없습니다.", NamedTextColor.YELLOW));
+            hud.notice(player, "보상 확정 중인 아이템은 아직 쓸 수 없습니다.", 0xFFFF55);
             return;
         }
         profiles.get(player.getUniqueId()).ifPresent(p -> {

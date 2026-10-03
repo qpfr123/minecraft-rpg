@@ -4,7 +4,8 @@
 # To regenerate this file, run: ./gradlew :dependencies --write-locks
 com.google.auto.service:auto-service-annotations:1.1.1=compileClasspath
 com.google.code.findbugs:jsr305:3.0.2=compileClasspath
-com.google.code.gson:gson:2.11.0=compileClasspath
+com.google.code.gson:gson:2.11.0=compileClasspath,testCompileClasspath,testRuntimeClasspath
+com.google.errorprone:error_prone_annotations:2.27.0=testCompileClasspath,testRuntimeClasspath
 com.google.errorprone:error_prone_annotations:2.28.0=compileClasspath
 com.google.guava:failureaccess:1.0.2=compileClasspath
 com.google.guava:guava:33.3.1-jre=compileClasspath

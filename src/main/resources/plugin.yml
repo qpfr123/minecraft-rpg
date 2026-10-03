@@ -5,8 +5,9 @@ api-version: '1.21.11'
 description: Minecraft RPG
 commands:
   rpg:
-    description: 스탯 확인·배분, 보상 수령
-    usage: /rpg stats | alloc <스탯> <양> | claim
+    description: RPG 메뉴(장비·스탯·보상), 스탯 확인·배분, 보상 수령
+    usage: /rpg [menu] | stats | alloc <스탯> <양> | claim
+    aliases: [menu]
     permission: minecraftrpg.player
   rpgadmin:
     description: RPG 관리자 조회·테스트

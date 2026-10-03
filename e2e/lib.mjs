@@ -79,6 +79,10 @@ export async function connectBot(username, port, { respawn = true } = {}) {
   bot.on('messagestr', (m) => bot.chatLog.push(m));
   bot.rawScores = {}; // mineflayer 4.39는 1.20.3+ 점수 패킷(action 없음)을 무시하므로 원시 패킷을 직접 기록
   bot._client.on('scoreboard_score', (p) => { bot.rawScores[`${p.scoreName}/${p.itemName}`] = p; });
+  bot.packs = []; // 서버가 보낸 리소스팩 요청(add_resource_pack)
+  bot._client.on('add_resource_pack', (p) => bot.packs.push(p));
+  bot.actionBars = []; // 원시 액션바(NBT) — HUD 글리프 확인용
+  bot._client.on('action_bar', (p) => { bot.actionBars.push(p); if (bot.actionBars.length > 50) bot.actionBars.shift(); });
   bot.deaths = 0;
   bot.on('death', () => bot.deaths++);
   await new Promise((resolve, reject) => {

@@ -1,0 +1,10 @@
+# MinecraftRPG 설정
+resource-pack:
+  # 접속하면 UI 리소스팩(HUD·메뉴 그림)을 보낸다. 플러그인이 직접 내려받기 주소를 연다.
+  enabled: true
+  # 내려받기용 HTTP 포트(마인크래프트 포트와 달라야 한다). JVM 옵션 -Dminecraftrpg.packPort 로 덮어쓸 수 있다.
+  port: 25580
+  # 플레이어가 받을 주소의 호스트. 비우면 플레이어가 서버에 접속할 때 입력한 주소를 그대로 쓴다.
+  public-host: ""
+  # true면 리소스팩을 거절한 클라이언트는 접속이 끊긴다(UI가 깨져 보이지 않게).
+  required: true

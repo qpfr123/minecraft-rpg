@@ -21,6 +21,7 @@ import io.github.qpfr123.rpg.paper.CombatListener;
 import io.github.qpfr123.rpg.paper.GearItems;
 import io.github.qpfr123.rpg.paper.HealthDisplay;
 import io.github.qpfr123.rpg.paper.HudTask;
+import io.github.qpfr123.rpg.paper.HudRenderer;
 import io.github.qpfr123.rpg.paper.Keys;
 import io.github.qpfr123.rpg.paper.MainThread;
 import io.github.qpfr123.rpg.paper.MobService;
@@ -46,6 +47,7 @@ public final class RpgPlugin extends JavaPlugin {
     private ProfileService profiles;
     private BackupService backups;
     private DungeonService dungeons;
+    private io.github.qpfr123.rpg.paper.ResourcePackService packs;
     private DungeonEditor editor;
 
     @Override
@@ -70,15 +72,24 @@ public final class RpgPlugin extends JavaPlugin {
         DamagePipeline pipeline = new DamagePipeline(() -> ThreadLocalRandom.current().nextDouble());
         backups = new BackupService(db, getDataFolder().toPath().resolve("backups"), getLogger());
 
-        CombatListener combatListener = new CombatListener(profiles, mobs, rewards, display, combat, pipeline, main);
+        saveDefaultConfig();
+        packs = new io.github.qpfr123.rpg.paper.ResourcePackService(getConfig().getConfigurationSection("resource-pack"), getLogger());
+        packs.start(getResource("resourcepack.zip"));
+        getServer().getPluginManager().registerEvents(packs, this);
+        HudRenderer hud = new HudRenderer(profiles);
+        CombatListener combatListener = new CombatListener(profiles, mobs, rewards, display, combat, pipeline, main, hud);
         getServer().getPluginManager().registerEvents(combatListener, this);
         SidebarService sidebar = new SidebarService();
         getServer().getPluginManager().registerEvents(
-                new PlayerListener(profiles, rewards, mobs, gear, display, combat, combatListener, main, sidebar), this);
-        getServer().getPluginManager().registerEvents(new ClaimLockListener(gear), this);
+                new PlayerListener(profiles, rewards, mobs, gear, display, combat, combatListener, main, sidebar, hud), this);
+        getServer().getPluginManager().registerEvents(new ClaimLockListener(gear, hud), this);
+        getServer().getPluginManager().registerEvents(new io.github.qpfr123.rpg.paper.VanillaHudListener(), this);
         getServer().getPluginManager().registerEvents(new VanillaGuardListener(gear, mobs), this);
 
         RpgCommand rpg = new RpgCommand(profiles, rewards);
+        io.github.qpfr123.rpg.paper.menu.MenuService menus = new io.github.qpfr123.rpg.paper.menu.MenuService(profiles, rewards, rpg, db, main);
+        rpg.setMenus(menus);
+        getServer().getPluginManager().registerEvents(menus, this);
         Objects.requireNonNull(getCommand("rpg")).setExecutor(rpg);
         Objects.requireNonNull(getCommand("rpg")).setTabCompleter(rpg);
         RpgAdminCommand admin = new RpgAdminCommand(profiles, mobs, rewards, backups, db, main, gearRegistry, gear);
@@ -117,11 +128,13 @@ public final class RpgPlugin extends JavaPlugin {
             public void onQuit(org.bukkit.event.player.PlayerQuitEvent e) {
                 parties.leave(e.getPlayer().getUniqueId()); // 파티는 메모리 전용: 접속을 끊으면 빠진다
                 dungeons.forgetOnQuit(e.getPlayer().getUniqueId());
+                hud.forget(e.getPlayer().getUniqueId());
             }
         }, this);
         Bukkit.getScheduler().runTaskTimer(this, dungeons::tick, SECOND, SECOND);
 
         Bukkit.getScheduler().runTaskTimer(this, new HudTask(profiles, mobs, display, combat, keys, sidebar), SECOND, SECOND);
+        Bukkit.getScheduler().runTaskTimer(this, hud, SECOND, 4L);
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             profiles.saveDirty();
             profiles.purgeRecent(5 * 60_000L);
@@ -141,6 +154,7 @@ public final class RpgPlugin extends JavaPlugin {
         if (editor != null) editor.shutdown(); // 저장하지 않은 편집은 버린다
         if (dungeons != null) dungeons.shutdown(); // 안에 있는 플레이어를 먼저 돌려보낸 뒤 저장
         if (profiles != null) profiles.saveAll();
+        if (packs != null) packs.stop();
         if (db != null) db.shutdown(); // 대기 중인 쓰기를 모두 끝낸 뒤 닫는다
         getLogger().info("MinecraftRPG disabled");
     }

@@ -9,10 +9,14 @@ DATA="$RUN_DIR/plugins/MinecraftRPG"
 DB="$DATA/rpg.db"
 
 [[ -f "$BACKUP" ]] || { echo "백업 파일 없음: $BACKUP" >&2; exit 1; }
-if pgrep -f "paper-.*\.jar" >/dev/null && [[ "${FORCE:-}" != "true" ]]; then
-  echo "Paper 서버가 실행 중입니다. 서버를 끈 뒤 다시 실행하세요(FORCE=true로 무시)." >&2
-  exit 1
-fi
+# 이 RUN_DIR에서 실행 중인 Paper만 막는다(같은 PC의 다른 서버 폴더는 상관없음).
+RUN_REAL="$(cd "$RUN_DIR" 2>/dev/null && pwd -P || echo "$RUN_DIR")"
+for pid in $(pgrep -f "paper-.*\.jar" || true); do
+  if [[ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" == "$RUN_REAL" && "${FORCE:-}" != "true" ]]; then
+    echo "이 폴더($RUN_DIR)의 Paper 서버가 실행 중입니다(PID $pid). 서버를 끈 뒤 다시 실행하세요(FORCE=true로 무시)." >&2
+    exit 1
+  fi
+done
 mkdir -p "$DATA"
 TS="$(date +%Y%m%d-%H%M%S)"
 if [[ -f "$DB" ]]; then

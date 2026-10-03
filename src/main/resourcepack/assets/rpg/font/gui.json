@@ -1,0 +1,31 @@
+{
+  "providers": [
+    {
+      "type": "bitmap",
+      "file": "rpg:font/gui_menu.png",
+      "ascent": 13,
+      "height": 222,
+      "chars": [
+        "\ue000"
+      ]
+    },
+    {
+      "type": "bitmap",
+      "file": "rpg:font/gui_stats.png",
+      "ascent": 13,
+      "height": 222,
+      "chars": [
+        "\ue001"
+      ]
+    },
+    {
+      "type": "bitmap",
+      "file": "rpg:font/gui_equipment.png",
+      "ascent": 13,
+      "height": 222,
+      "chars": [
+        "\ue002"
+      ]
+    }
+  ]
+}

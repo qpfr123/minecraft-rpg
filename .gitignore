@@ -5,3 +5,5 @@ run/
 .idea/
 run-e2e/
 e2e/node_modules/
+run-boot/
+__pycache__/

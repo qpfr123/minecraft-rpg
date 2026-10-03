@@ -21,8 +21,11 @@ import java.util.Iterator;
 public final class ClaimLockListener implements Listener {
     private final GearItems gear;
 
-    public ClaimLockListener(GearItems gear) {
+    private final HudRenderer hud;
+
+    public ClaimLockListener(GearItems gear, HudRenderer hud) {
         this.gear = gear;
+        this.hud = hud;
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
@@ -84,8 +87,7 @@ public final class ClaimLockListener implements Listener {
         }
     }
 
-    private static void notice(org.bukkit.entity.HumanEntity who) {
-        who.sendActionBar(net.kyori.adventure.text.Component.text("보상 확정 중인 아이템은 아직 옮길 수 없습니다.",
-                net.kyori.adventure.text.format.NamedTextColor.YELLOW));
+    private void notice(org.bukkit.entity.HumanEntity who) {
+        if (who instanceof org.bukkit.entity.Player p) hud.notice(p, "보상 확정 중인 아이템은 아직 옮길 수 없습니다.", 0xFFFF55);
     }
 }

@@ -15,10 +15,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/** /rpg stats | alloc <스탯> <양> | claim */
+/** /rpg [menu] | stats | alloc <스탯> <양> | claim */
 public final class RpgCommand implements TabExecutor {
     private final ProfileService profiles;
     private final RewardService rewards;
+
+    private io.github.qpfr123.rpg.paper.menu.MenuService menus;
+
+    public void setMenus(io.github.qpfr123.rpg.paper.menu.MenuService menus) {
+        this.menus = menus;
+    }
 
     public RpgCommand(ProfileService profiles, RewardService rewards) {
         this.profiles = profiles;
@@ -36,12 +42,15 @@ public final class RpgCommand implements TabExecutor {
             player.sendMessage(Component.text("RPG 데이터를 불러오는 중입니다.", NamedTextColor.GRAY));
             return true;
         }
-        String sub = args.length == 0 ? "stats" : args[0].toLowerCase(Locale.ROOT);
+        String sub = args.length == 0 ? "menu" : args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
+            case "menu" -> {
+                if (menus != null) menus.openMain(player);
+            }
             case "stats" -> showStats(player, profile);
             case "alloc" -> allocate(player, profile, args);
             case "claim" -> rewards.claimAll(player);
-            default -> player.sendMessage(Component.text("/rpg stats | /rpg alloc <스탯> <양> | /rpg claim", NamedTextColor.GRAY));
+            default -> player.sendMessage(Component.text("/rpg (메뉴) | /rpg stats | /rpg alloc <스탯> <양> | /rpg claim", NamedTextColor.GRAY));
         }
         return true;
     }
@@ -56,10 +65,7 @@ public final class RpgCommand implements TabExecutor {
             alloc.append(st.displayName()).append(' ').append(p.allocation().get(st)).append("  ");
         }
         player.sendMessage(Component.text(alloc.toString().trim(), NamedTextColor.YELLOW));
-        player.sendMessage(Component.text(String.format(Locale.ROOT,
-                "최대HP %d  최대MP %d  ATK %.1f  DEF %.1f%%  치명 %.1f%%/+%.0f%%  공속 %.2f  재생 %.1f/%.1f  드롭 +%.1f%%",
-                s.maxHp(), s.maxMp(), s.atk(), s.def() * 100, s.critChance() * 100, s.critDamage() * 100,
-                s.attackSpeed(), s.hpRegen(), s.mpRegen(), s.dropBonus() * 100), NamedTextColor.WHITE));
+        player.sendMessage(Component.text(String.join("  ", summary(s)), NamedTextColor.WHITE));
         player.sendMessage(Component.text("배분: /rpg alloc <근력|민첩|저항|건강|집중|행운|정신> <양>", NamedTextColor.GRAY));
     }
 
@@ -79,6 +85,11 @@ public final class RpgCommand implements TabExecutor {
             player.sendMessage(Component.text("알 수 없는 스탯: " + args[1], NamedTextColor.RED));
             return;
         }
+        allocate(player, p, stat, amount);
+    }
+
+    /** 스탯 배분(명령어·메뉴 공용). @return 반영됐으면 true */
+    public boolean allocate(Player player, PlayerProfile p, SecondaryStat stat, int amount) {
         // 메인 스레드에서 검증과 반영을 한 번에 하므로 연속 입력에도 상한을 우회할 수 없다.
         PointAllocationPolicy.Result r = p.allocate(stat, amount);
         switch (r) {
@@ -86,17 +97,32 @@ public final class RpgCommand implements TabExecutor {
                 profiles.save(p);
                 player.sendMessage(Component.text(stat.displayName() + " +" + amount + " (현재 " + p.allocation().get(stat)
                         + ", 남은 포인트 " + p.unspentPoints() + ")", NamedTextColor.GREEN));
+                return true;
             }
             case INVALID_AMOUNT -> player.sendMessage(Component.text("양은 1 이상의 정수여야 합니다.", NamedTextColor.RED));
             case NOT_ENOUGH_POINTS -> player.sendMessage(Component.text("포인트가 부족합니다. 남은 포인트 " + p.unspentPoints(), NamedTextColor.RED));
             case CAP_EXCEEDED -> player.sendMessage(Component.text("한 스탯에는 지급 포인트의 50%("
                     + PointAllocationPolicy.singleStatCap(p.level()) + ")까지만 투자할 수 있습니다.", NamedTextColor.RED));
         }
+        return false;
+    }
+
+    /** 계산된 능력치 요약(명령어·메뉴 공용). */
+    public static List<String> summary(StatSnapshot s) {
+        return List.of(
+                String.format(Locale.ROOT, "최대HP %d", s.maxHp()),
+                String.format(Locale.ROOT, "최대MP %d", s.maxMp()),
+                String.format(Locale.ROOT, "ATK %.1f", s.atk()),
+                String.format(Locale.ROOT, "DEF %.1f%%", s.def() * 100),
+                String.format(Locale.ROOT, "치명 %.1f%%/+%.0f%%", s.critChance() * 100, s.critDamage() * 100),
+                String.format(Locale.ROOT, "공속 %.2f", s.attackSpeed()),
+                String.format(Locale.ROOT, "재생 %.1f/%.1f", s.hpRegen(), s.mpRegen()),
+                String.format(Locale.ROOT, "드롭 +%.1f%%", s.dropBonus() * 100));
     }
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length == 1) return filter(List.of("stats", "alloc", "claim"), args[0]);
+        if (args.length == 1) return filter(List.of("menu", "stats", "alloc", "claim"), args[0]);
         if (args.length == 2 && args[0].equalsIgnoreCase("alloc")) {
             List<String> names = new ArrayList<>();
             for (SecondaryStat s : SecondaryStat.values()) names.add(s.displayName());
