@@ -16,7 +16,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 
+import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.function.Consumer;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -56,6 +60,11 @@ public final class RewardService {
     private final LootRoller roller;
     private final Logger log;
     private final Set<String> inFlight = new HashSet<>();
+    /**
+     * 플레이어별 수령 작업 큐. 한 번에 한 보상만 "EXP 반영 → CLAIMED 커밋" 구간에 있도록 직렬화한다.
+     * 그렇지 않으면 A의 완료가 실패한 사이 B의 완료 트랜잭션이 A의 EXP까지 저장하고, 이후 A 복구가 EXP를 다시 더한다.
+     */
+    private final Map<UUID, ArrayDeque<Consumer<Runnable>>> queues = new HashMap<>();
     private volatile CrashPoint crashPoint = CrashPoint.NONE;
 
     public RewardService(Plugin plugin, DbExecutor db, ProfileService profiles, GearRegistry gearRegistry, GearItems gearItems,
@@ -132,21 +141,67 @@ public final class RewardService {
     private void claim(Player player, RewardGrant grant, boolean fromKill) {
         String key = key(grant);
         if (!inFlight.add(key)) return;
-        if (GearItems.freeSlots(player) < grant.gearIds().size()) {
+        UUID id = player.getUniqueId();
+        enqueue(id, done -> { // 대기하는 동안 재접속했을 수 있으므로 실행 시점의 Player를 쓴다
+            Player current = Bukkit.getPlayer(id);
+            if (current == null) {
+                inFlight.remove(key);
+                done.run();
+            } else {
+                claimNow(current, grant, fromKill, key, done);
+            }
+        });
+    }
+
+    /** 작업을 플레이어 큐에 넣는다. 작업은 끝날 때 done을 정확히 한 번 호출해야 다음 작업이 시작된다. */
+    private void enqueue(UUID playerId, Consumer<Runnable> job) {
+        ArrayDeque<Consumer<Runnable>> q = queues.computeIfAbsent(playerId, k -> new ArrayDeque<>());
+        q.add(job);
+        if (q.size() == 1) runHead(playerId, q);
+    }
+
+    private void runHead(UUID playerId, ArrayDeque<Consumer<Runnable>> q) {
+        Consumer<Runnable> job = q.peek();
+        if (job == null) {
+            queues.remove(playerId, q);
+            return;
+        }
+        boolean[] finished = {false};
+        job.accept(() -> {
+            if (finished[0]) return;
+            finished[0] = true;
+            q.poll();
+            if (q.isEmpty()) queues.remove(playerId, q);
+            else main.nextTick(() -> runHead(playerId, q));
+        });
+    }
+
+    private void claimNow(Player player, RewardGrant grant, boolean fromKill, String key, Runnable done) {
+        Runnable abort = () -> {
             inFlight.remove(key);
+            done.run();
+        };
+        if (!player.isOnline()) {
+            abort.run();
+            return;
+        }
+        if (GearItems.freeSlots(player) < grant.gearIds().size()) {
             player.sendMessage(Component.text("인벤토리 공간이 부족해 보상이 보상함에 보관됐습니다. /rpg claim 으로 받으세요.", NamedTextColor.YELLOW));
+            abort.run();
             return;
         }
         db.submit("claiming " + key, d -> d.transition(grant.eventId(), grant.recipient(),
                 RewardGrant.Status.PENDING, RewardGrant.Status.CLAIMING)).whenComplete((ok, error) -> main.nextTick(() -> {
             if (error != null || !ok) { // 쓰기 실패 또는 이미 다른 경로에서 처리 중: 아무것도 지급하지 않음
-                inFlight.remove(key);
-                if (error != null) player.sendMessage(Component.text("보상 수령에 실패했습니다. 잠시 후 /rpg claim 으로 다시 시도하세요.", NamedTextColor.RED));
+                if (error != null && player.isOnline()) {
+                    player.sendMessage(Component.text("보상 수령에 실패했습니다. 잠시 후 /rpg claim 으로 다시 시도하세요.", NamedTextColor.RED));
+                }
+                abort.run();
                 return;
             }
             PlayerProfile profile = profiles.get(player.getUniqueId()).orElse(null);
             if (!player.isOnline() || profile == null || GearItems.freeSlots(player) < grant.gearIds().size()) {
-                revert(grant, key);
+                revert(grant, key, done);
                 return;
             }
             for (int i = 0; i < grant.gearIds().size(); i++) {
@@ -163,7 +218,7 @@ public final class RewardService {
             haltIf(CrashPoint.BEFORE_SAVE, key);
             player.saveData();
             haltIf(CrashPoint.AFTER_SAVE, key);
-            beginCompletion(player.getUniqueId(), profile, grant, fromKill);
+            beginCompletion(player.getUniqueId(), profile, grant, fromKill, done);
         }));
     }
 
@@ -174,29 +229,37 @@ public final class RewardService {
     }
 
     /** EXP를 메모리에 반영하고, CLAIMED 커밋이 확인될 때까지 재시도한다. */
-    private void beginCompletion(UUID playerId, PlayerProfile profile, RewardGrant grant, boolean fromKill) {
+    /** 플레이어 큐 안에서만 호출된다. 이 보상의 EXP만 반영하고 CLAIMED 커밋까지 재시도한다. */
+    private void beginCompletion(UUID playerId, PlayerProfile profile, RewardGrant grant, boolean fromKill, Runnable done) {
+        if (profile.completionPending()) { // 직렬화가 깨졌다면 진행하지 않는다(EXP 이중 저장 방지)
+            log.severe("completion already pending for " + playerId + ", refusing to start " + key(grant));
+            inFlight.remove(key(grant));
+            done.run();
+            return;
+        }
         int levelBefore = profile.level();
         profile.addExp(grant.exp());
         profile.beginCompletion();
-        attemptCompletion(playerId, profile, grant, fromKill, levelBefore, RETRY_TICKS_MIN);
+        attemptCompletion(playerId, profile, grant, fromKill, levelBefore, RETRY_TICKS_MIN, done);
     }
 
     private void attemptCompletion(UUID playerId, PlayerProfile profile, RewardGrant grant, boolean fromKill,
-                                   int levelBefore, long nextDelay) {
+                                   int levelBefore, long nextDelay, Runnable done) {
         String key = key(grant);
         PlayerProfile.Snapshot snap = profile.snapshot();
         db.submit("complete " + key, d -> d.completeClaim(grant.eventId(), grant.recipient(), snap))
-                .whenComplete((done, error) -> main.nextTick(() -> {
+                .whenComplete((committed, error) -> main.nextTick(() -> {
                     if (error != null) {
                         profile.onSaveFailed(snap);
                         log.warning("claim completion failed for " + key + ", retrying in " + nextDelay / 20 + "s");
                         Bukkit.getScheduler().runTaskLater(plugin, () -> attemptCompletion(playerId, profile, grant, fromKill,
-                                levelBefore, Math.min(RETRY_TICKS_MAX, nextDelay * 2)), nextDelay);
+                                levelBefore, Math.min(RETRY_TICKS_MAX, nextDelay * 2), done), nextDelay);
                         return;
                     }
                     profile.endCompletion();
                     inFlight.remove(key);
-                    if (!done) {
+                    done.run();
+                    if (!committed) {
                         // CLAIMING이 아니었다: 다른 경로가 이미 끝냈거나 상태가 어긋났다. 이 스냅샷은 저장되지 않았다.
                         profile.onSaveFailed(snap);
                         log.severe("claim completion skipped, reward not in CLAIMING: " + key + " (EXP " + grant.exp() + " may need admin review)");
@@ -221,10 +284,13 @@ public final class RewardService {
         }
     }
 
-    private void revert(RewardGrant grant, String key) {
+    private void revert(RewardGrant grant, String key, Runnable done) {
         db.submit("revert " + key, d -> d.transition(grant.eventId(), grant.recipient(),
                 RewardGrant.Status.CLAIMING, RewardGrant.Status.PENDING))
-                .whenComplete((v, e) -> main.nextTick(() -> inFlight.remove(key)));
+                .whenComplete((v, e) -> main.nextTick(() -> {
+                    inFlight.remove(key);
+                    done.run();
+                }));
     }
 
     /**
@@ -244,7 +310,6 @@ public final class RewardService {
             Set<String> ids = new HashSet<>();
             for (int i = 0; i < g.gearIds().size(); i++) ids.add(g.instanceId(i));
             long found = ids.isEmpty() ? 0 : gearItems.countInstances(player, ids);
-            PlayerProfile profile = profiles.require(player);
             if (found > 0) {
                 if (found < ids.size()) {
                     log.warning("reward " + key + ": only " + found + "/" + ids.size()
@@ -252,11 +317,15 @@ public final class RewardService {
                 } else {
                     log.info("recovered delivered reward " + key + " (" + found + "/" + ids.size() + " items found)");
                 }
-                beginCompletion(player.getUniqueId(), profile, g, false);
+                UUID pid = player.getUniqueId();
+                enqueue(pid, done -> profiles.get(pid).ifPresentOrElse(
+                        profile -> beginCompletion(pid, profile, g, false, done),
+                        () -> { inFlight.remove(key); done.run(); })); // 처리 전에 나갔으면 다음 입장 때 다시 복구
+
             } else {
                 log.info("reverting undelivered reward " + key + " to PENDING");
                 pending++;
-                revert(g, key);
+                revert(g, key, () -> {});
             }
         }
         // CLAIMED가 커밋된 뒤 잠금 해제 전에 서버가 꺼졌던 아이템

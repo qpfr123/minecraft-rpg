@@ -341,6 +341,44 @@ async function main() {
     check('[일부 남음] 관리자 확인용 경고 로그', server.all.some((l) => /only 1\/2 delivered items found/.test(l)));
   }
 
+  // 10-6. 보상 A 완료 실패 중 보상 B: 플레이어별 직렬화로 B의 EXP가 A의 트랜잭션에 섞이지 않는다
+  {
+    const p0 = await profile('bot_a');
+    const blade0 = countItem(a, 'iron_sword');
+    const tonic0 = countItem(a, 'honey_bottle');
+    server.cmd('rpgadmin dbfail complete 1');
+    server.cmd('rpgadmin testgrant bot_a 10 shield_tonic');   // A: 완료 1회 실패 → 5초 뒤 재시도 예정
+    await sleep(1200);
+    const fromB = a.chatLog.length;
+    server.cmd('rpgadmin testgrant bot_a 20 ghoul_blade');    // B: A가 끝날 때까지 대기해야 함
+    await sleep(2000);
+    const rowsMid = (await ledger('bot_a')).filter((r) => r.event.startsWith('test:') && (r.exp === 10 || r.exp === 20));
+    const aMid = rowsMid.find((r) => r.exp === 10);
+    const bMid = rowsMid.find((r) => r.exp === 20);
+    check('A 재시도 전: A는 CLAIMING, B는 PENDING(지급·확정 안 됨)', aMid?.status === 'CLAIMING' && bMid?.status === 'PENDING'
+      && countItem(a, 'iron_sword') === blade0 && !a.chatLog.slice(fromB).some((m) => /보상/.test(m)), JSON.stringify(rowsMid));
+    server.cmd('save-all');
+    await server.waitFor(/Saved the game/, 15_000);
+    server.proc.kill('SIGKILL'); // A 재시도 전에 강제 종료
+    await server.exit;
+    await quit(a); await quit(b);
+    await server.start();
+    a = await connectBot('bot_a', PORT, { respawn: false });
+    b = await connectBot('bot_b', PORT);
+    await sleep(3000);
+    const fromC = a.chatLog.length;
+    a.chat('/rpg claim'); // B(PENDING) 수령
+    await waitChat(a, /보상 수령: \+20 EXP/, 15_000, fromC).catch(() => null);
+    await sleep(1500);
+    const rows = (await ledger('bot_a')).filter((r) => r.event.startsWith('test:') && (r.exp === 10 || r.exp === 20));
+    const p1 = await profile('bot_a');
+    const exp = addExp(p0.level, p0.exp, 30);
+    check('[겹친 보상] 재시작 후 A·B 모두 CLAIMED 1건씩', rows.length === 2 && rows.every((r) => r.status === 'CLAIMED'), JSON.stringify(rows));
+    check('[겹친 보상] EXP는 10+20=30 정확히 한 번', p1.level === exp.level && p1.exp === exp.exp, `${p0.level}/${p0.exp}→${p1.level}/${p1.exp}, 기대 ${exp.level}/${exp.exp}`);
+    check('[겹친 보상] 아이템도 각각 정확히 한 번', countItem(a, 'honey_bottle') === tonic0 + 1 && countItem(a, 'iron_sword') === blade0 + 1,
+      `tonic ${tonic0}→${countItem(a, 'honey_bottle')} blade ${blade0}→${countItem(a, 'iron_sword')}`);
+  }
+
   // 11. 지급 중 강제 종료 — 플레이어 데이터 저장 후, CLAIMED 커밋 전
   for (const [mode, label] of [['claim', '저장 후'], ['claim-nosave', '저장 전']]) {
     await holdItem(a, 'iron_sword');
