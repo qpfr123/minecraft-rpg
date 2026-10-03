@@ -65,7 +65,7 @@ public final class RpgPlugin extends JavaPlugin {
         RpgCommand rpg = new RpgCommand(profiles, rewards);
         Objects.requireNonNull(getCommand("rpg")).setExecutor(rpg);
         Objects.requireNonNull(getCommand("rpg")).setTabCompleter(rpg);
-        RpgAdminCommand admin = new RpgAdminCommand(profiles, mobs, rewards, backups, db, main);
+        RpgAdminCommand admin = new RpgAdminCommand(profiles, mobs, rewards, backups, db, main, gearRegistry, gear);
         Objects.requireNonNull(getCommand("rpgadmin")).setExecutor(admin);
         Objects.requireNonNull(getCommand("rpgadmin")).setTabCompleter(admin);
 

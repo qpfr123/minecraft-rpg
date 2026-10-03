@@ -29,9 +29,13 @@ public final class RpgAdminCommand implements TabExecutor {
     private final BackupService backups;
     private final DbExecutor db;
     private final MainThread main;
+    private final io.github.qpfr123.rpg.loot.GearRegistry gearRegistry;
+    private final GearItems gearItems;
 
     public RpgAdminCommand(ProfileService profiles, MobService mobs, RewardService rewards, BackupService backups,
-                           DbExecutor db, MainThread main) {
+                           DbExecutor db, MainThread main, io.github.qpfr123.rpg.loot.GearRegistry gearRegistry, GearItems gearItems) {
+        this.gearRegistry = gearRegistry;
+        this.gearItems = gearItems;
         this.profiles = profiles;
         this.mobs = mobs;
         this.rewards = rewards;
@@ -50,14 +54,20 @@ public final class RpgAdminCommand implements TabExecutor {
             case "backup" -> main.then(backups.backup("manual"), path -> sender.sendMessage("백업 완료: " + path));
             case "level" -> level(sender, args);
             case "crashtest" -> {
-                if (args.length >= 2 && args[1].equalsIgnoreCase("claim")) {
-                    rewards.armCrashTest();
-                    sender.sendMessage(Component.text("다음 보상 수령에서 아이템 지급 직후 서버를 강제 종료합니다(테스트용).", NamedTextColor.RED));
+                RewardService.CrashPoint point = args.length < 2 ? null : switch (args[1].toLowerCase(Locale.ROOT)) {
+                    case "claim" -> RewardService.CrashPoint.AFTER_SAVE;
+                    case "claim-nosave" -> RewardService.CrashPoint.BEFORE_SAVE;
+                    default -> null;
+                };
+                if (point == null) {
+                    sender.sendMessage("/rpgadmin crashtest <claim|claim-nosave>");
                 } else {
-                    sender.sendMessage("/rpgadmin crashtest claim");
+                    rewards.armCrashTest(point);
+                    sender.sendMessage(Component.text("[테스트] 다음 보상 수령에서 서버를 강제 종료합니다: " + point, NamedTextColor.RED));
                 }
             }
-            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <ghoul|bone_archer|grave_knight> · backup · level <플레이어> <레벨> · crashtest claim");
+            case "givegear" -> giveGear(sender, args);
+            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave>");
         }
         return true;
     }
@@ -112,9 +122,24 @@ public final class RpgAdminCommand implements TabExecutor {
         });
     }
 
+    /** 테스트용 장비 지급. 보상 원장을 거치지 않으므로 관리자 전용이며 로그를 남긴다. */
+    private void giveGear(CommandSender sender, String[] args) {
+        Player target = args.length >= 3 ? Bukkit.getPlayerExact(args[1]) : null;
+        var def = args.length >= 3 ? gearRegistry.get(args[2]).orElse(null) : null;
+        if (target == null || def == null) {
+            sender.sendMessage("/rpgadmin givegear <접속 중 플레이어> <장비ID>");
+            return;
+        }
+        String instance = "admin:" + UUID.randomUUID();
+        target.getInventory().addItem(gearItems.create(def, instance));
+        Bukkit.getLogger().warning("[MinecraftRPG] admin " + sender.getName() + " gave " + def.id() + " (" + instance + ") to " + target.getName());
+        sender.sendMessage("지급: " + def.displayName() + " → " + target.getName());
+    }
+
     private void spawn(CommandSender sender, String[] args) {
-        if (!(sender instanceof Player player) || args.length < 2) {
-            sender.sendMessage("게임 안에서 /rpgadmin spawn <몹ID>");
+        Player player = args.length >= 3 ? Bukkit.getPlayerExact(args[2]) : sender instanceof Player p ? p : null;
+        if (player == null || args.length < 2) {
+            sender.sendMessage("/rpgadmin spawn <몹ID> [근처 플레이어]");
             return;
         }
         MobStatProfile p = mobs.registry().get(args[1]).orElse(null);
@@ -122,8 +147,10 @@ public final class RpgAdminCommand implements TabExecutor {
             sender.sendMessage("알 수 없는 몹: " + args[1]);
             return;
         }
-        mobs.spawn(p, player.getLocation().add(player.getLocation().getDirection().setY(0).normalize().multiply(4)));
-        sender.sendMessage("소환: " + p.displayName());
+        var dir = player.getLocation().getDirection().setY(0);
+        if (dir.lengthSquared() < 1e-6) dir = new org.bukkit.util.Vector(1, 0, 0);
+        var mob = mobs.spawn(p, player.getLocation().add(dir.normalize().multiply(3)));
+        sender.sendMessage("소환: " + p.displayName() + " " + mob.getUniqueId());
     }
 
     private void level(CommandSender sender, String[] args) {
@@ -153,13 +180,13 @@ public final class RpgAdminCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest"), args[0]);
+        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear"), args[0]);
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
             List<String> ids = new ArrayList<>();
             mobs.registry().all().forEach(m -> ids.add(m.id()));
             return RpgCommand.filter(ids, args[1]);
         }
-        if (args.length == 2 && args[0].equalsIgnoreCase("crashtest")) return List.of("claim");
+        if (args.length == 2 && args[0].equalsIgnoreCase("crashtest")) return List.of("claim", "claim-nosave");
         if (args.length == 2) return null; // 플레이어 이름
         return List.of();
     }

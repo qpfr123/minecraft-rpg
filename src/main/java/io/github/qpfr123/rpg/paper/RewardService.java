@@ -40,8 +40,10 @@ public final class RewardService {
     private final LootRoller roller;
     private final Logger log;
     private final Set<String> inFlight = new HashSet<>();
-    /** 테스트용: 다음 수령에서 아이템 지급·플레이어 저장 직후 서버를 강제 종료한다. */
-    private volatile boolean crashAfterNextDelivery;
+    /** 테스트용 강제 종료 지점. */
+    public enum CrashPoint { NONE, AFTER_SAVE, BEFORE_SAVE }
+
+    private volatile CrashPoint crashPoint = CrashPoint.NONE;
 
     public RewardService(DbExecutor db, ProfileService profiles, GearRegistry gearRegistry, GearItems gearItems,
                          MainThread main, LootRoller roller, Logger log) {
@@ -54,8 +56,12 @@ public final class RewardService {
         this.log = log;
     }
 
-    public void armCrashTest() {
-        crashAfterNextDelivery = true;
+    /**
+     * 다음 수령에서 서버를 강제 종료한다. AFTER_SAVE: 아이템 지급·플레이어 데이터 저장 후, CLAIMED 커밋 전.
+     * BEFORE_SAVE: 아이템 지급 후 플레이어 데이터 저장 전(재시작하면 아이템이 사라진 상태).
+     */
+    public void armCrashTest(CrashPoint point) {
+        crashPoint = point;
     }
 
     /** 처치 확정 후 수령자별 보상을 굴려 원장에 기록하고, 접속 중이면 바로 수령을 시도한다. */
@@ -126,13 +132,17 @@ public final class RewardService {
                 ItemStack item = gearItems.create(def, grant.instanceId(i));
                 player.getInventory().addItem(item);
             }
+            haltIf(CrashPoint.BEFORE_SAVE, key);
             player.saveData();
-            if (crashAfterNextDelivery) {
-                log.severe("[crash-test] halting right after item delivery, before CLAIMED commit: " + key);
-                Runtime.getRuntime().halt(137);
-            }
+            haltIf(CrashPoint.AFTER_SAVE, key);
             complete(player, grant, key, fromKill);
         });
+    }
+
+    private void haltIf(CrashPoint point, String key) {
+        if (crashPoint != point) return;
+        log.severe("[crash-test] halting at " + point + " for " + key);
+        Runtime.getRuntime().halt(137);
     }
 
     private void complete(Player player, RewardGrant grant, String key, boolean fromKill) {
