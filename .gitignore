@@ -3,3 +3,5 @@ build/
 run/
 *.iml
 .idea/
+run-e2e/
+e2e/node_modules/

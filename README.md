@@ -14,6 +14,10 @@ export JAVA_HOME=/path/to/jdk-21
 ./gradlew build                                   # 플러그인 jar와 테스트
 EULA_ACCEPTED=true scripts/run-server.sh --boot-test  # 부팅→활성화→정상 종료 검증 (BOOT_TIMEOUT 기본 300초, 초과 시 실패)
 EULA_ACCEPTED=true scripts/run-server.sh              # 로컬 테스트 서버 실행 (run/)
+EULA_ACCEPTED=true scripts/e2e.sh                     # 봇 2개로 슬라이스 1 통과 조건 재현 (run-e2e/, 약 8분)
+scripts/restore-db.sh <백업파일>                       # 서버를 끈 뒤 RPG DB 복원
 ```
+
+E2E에는 Node.js 22가 필요하다.
 
 `EULA_ACCEPTED=true`는 Minecraft EULA(https://aka.ms/MinecraftEULA)에 동의한다는 뜻이다.
