@@ -36,6 +36,11 @@ public final class DbExecutor {
         }, exec);
     }
 
+    /** 장애 주입(관리자 검증용). 내부 카운터는 스레드 안전하다. */
+    public void injectFailures(Database.FaultPoint point, int count) {
+        db.injectFailures(point, count);
+    }
+
     /** 대기 중인 쓰기를 모두 끝내고 닫는다. */
     public void shutdown() {
         exec.shutdown();

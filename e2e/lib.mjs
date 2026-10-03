@@ -10,6 +10,7 @@ export class Server {
   constructor({ dir, jar, java, port }) {
     Object.assign(this, { dir, jar, java, port });
     this.lines = [];
+    this.all = []; // 재시작을 넘어 누적
     this.waiters = [];
   }
 
@@ -23,6 +24,7 @@ export class Server {
         const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
         if (!line) continue;
         this.lines.push(line);
+        this.all.push(line);
         fs.appendFileSync(path.join(this.dir, 'e2e-server.log'), line + '\n');
         this.waiters = this.waiters.filter((w) => !(w.re.test(line) && (w.resolve(line), true)));
       }
@@ -75,6 +77,8 @@ export async function connectBot(username, port, { respawn = true } = {}) {
   const bot = mineflayer.createBot({ host: '127.0.0.1', port, username, auth: 'offline', version: '1.21.11', respawn });
   bot.chatLog = [];
   bot.on('messagestr', (m) => bot.chatLog.push(m));
+  bot.rawScores = {}; // mineflayer 4.39는 1.20.3+ 점수 패킷(action 없음)을 무시하므로 원시 패킷을 직접 기록
+  bot._client.on('scoreboard_score', (p) => { bot.rawScores[`${p.scoreName}/${p.itemName}`] = p; });
   bot.deaths = 0;
   bot.on('death', () => bot.deaths++);
   await new Promise((resolve, reject) => {

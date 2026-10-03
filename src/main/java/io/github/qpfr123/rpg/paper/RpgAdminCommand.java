@@ -67,7 +67,9 @@ public final class RpgAdminCommand implements TabExecutor {
                 }
             }
             case "givegear" -> giveGear(sender, args);
-            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave>");
+            case "testgrant" -> testGrant(sender, args);
+            case "dbfail" -> dbFail(sender, args);
+            default -> sender.sendMessage("/rpgadmin profile|ledger <플레이어> · spawn <몹ID> [플레이어] · backup · level <플레이어> <레벨> · givegear <플레이어> <장비ID> · crashtest <claim|claim-nosave> · testgrant <플레이어> <EXP> [장비...] · dbfail <지점> <횟수>");
         }
         return true;
     }
@@ -120,6 +122,55 @@ public final class RpgAdminCommand implements TabExecutor {
                         g.status() == RewardGrant.Status.CLAIMED ? NamedTextColor.GRAY : NamedTextColor.YELLOW));
             }
         });
+    }
+
+    /** /rpgadmin testgrant <플레이어> <EXP> [장비ID...] — 처치 보상과 같은 원장·수령 경로로 테스트 보상 생성. */
+    private void testGrant(CommandSender sender, String[] args) {
+        Player target = args.length >= 3 ? Bukkit.getPlayerExact(args[1]) : null;
+        long exp;
+        try {
+            exp = args.length >= 3 ? Long.parseLong(args[2]) : -1;
+        } catch (NumberFormatException e) {
+            exp = -1;
+        }
+        List<String> gearIds = new ArrayList<>();
+        for (int i = 3; i < args.length; i++) {
+            if (gearRegistry.get(args[i]).isEmpty()) {
+                sender.sendMessage("알 수 없는 장비: " + args[i]);
+                return;
+            }
+            gearIds.add(args[i]);
+        }
+        if (target == null || exp < 0) {
+            sender.sendMessage("/rpgadmin testgrant <접속 중 플레이어> <EXP> [장비ID...]");
+            return;
+        }
+        rewards.grantTest(target, exp, gearIds);
+        sender.sendMessage("테스트 보상 생성: " + target.getName() + " EXP " + exp + " " + gearIds);
+    }
+
+    /** /rpgadmin dbfail <save|record|transition|complete> <횟수> — 다음 N번의 해당 DB 쓰기를 실패시킨다(검증용). */
+    private void dbFail(CommandSender sender, String[] args) {
+        io.github.qpfr123.rpg.storage.Database.FaultPoint point = args.length < 3 ? null : switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "save" -> io.github.qpfr123.rpg.storage.Database.FaultPoint.SAVE_PROFILE;
+            case "record" -> io.github.qpfr123.rpg.storage.Database.FaultPoint.RECORD_REWARD;
+            case "transition" -> io.github.qpfr123.rpg.storage.Database.FaultPoint.TRANSITION;
+            case "complete" -> io.github.qpfr123.rpg.storage.Database.FaultPoint.COMPLETE_CLAIM;
+            default -> null;
+        };
+        int count;
+        try {
+            count = args.length < 3 ? -1 : Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            count = -1;
+        }
+        if (point == null || count < 0) {
+            sender.sendMessage("/rpgadmin dbfail <save|record|transition|complete> <횟수>");
+            return;
+        }
+        db.injectFailures(point, count);
+        Bukkit.getLogger().warning("[MinecraftRPG] admin " + sender.getName() + " injected " + count + " DB failures at " + point);
+        sender.sendMessage("[검증] 다음 " + count + "번의 " + point + " 쓰기를 실패시킵니다.");
     }
 
     /** 테스트용 장비 지급. 보상 원장을 거치지 않으므로 관리자 전용이며 로그를 남긴다. */
@@ -180,13 +231,14 @@ public final class RpgAdminCommand implements TabExecutor {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear"), args[0]);
+        if (args.length == 1) return RpgCommand.filter(List.of("profile", "ledger", "spawn", "backup", "level", "crashtest", "givegear", "testgrant", "dbfail"), args[0]);
         if (args.length == 2 && args[0].equalsIgnoreCase("spawn")) {
             List<String> ids = new ArrayList<>();
             mobs.registry().all().forEach(m -> ids.add(m.id()));
             return RpgCommand.filter(ids, args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("crashtest")) return List.of("claim", "claim-nosave");
+        if (args.length == 2 && args[0].equalsIgnoreCase("dbfail")) return List.of("save", "record", "transition", "complete");
         if (args.length == 2) return null; // 플레이어 이름
         return List.of();
     }

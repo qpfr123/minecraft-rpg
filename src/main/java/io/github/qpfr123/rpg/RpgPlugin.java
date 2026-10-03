@@ -6,6 +6,9 @@ import io.github.qpfr123.rpg.loot.GearRegistry;
 import io.github.qpfr123.rpg.loot.LootRoller;
 import io.github.qpfr123.rpg.mob.MobRegistry;
 import io.github.qpfr123.rpg.paper.BackupService;
+import io.github.qpfr123.rpg.paper.ClaimLockListener;
+import io.github.qpfr123.rpg.paper.SidebarService;
+import io.github.qpfr123.rpg.paper.VanillaGuardListener;
 import io.github.qpfr123.rpg.paper.CombatListener;
 import io.github.qpfr123.rpg.paper.GearItems;
 import io.github.qpfr123.rpg.paper.HealthDisplay;
@@ -48,19 +51,22 @@ public final class RpgPlugin extends JavaPlugin {
         MainThread main = new MainThread(this);
         GearRegistry gearRegistry = GearRegistry.slice1();
         GearItems gear = new GearItems(keys, gearRegistry);
-        profiles = new ProfileService(db, gear, getLogger());
+        profiles = new ProfileService(db, gear, main, getLogger());
         MobService mobs = new MobService(keys, MobRegistry.slice1());
         HealthDisplay display = new HealthDisplay(main);
         CombatStateTracker combat = new CombatStateTracker();
-        RewardService rewards = new RewardService(db, profiles, gearRegistry, gear, main,
+        RewardService rewards = new RewardService(this, db, profiles, gearRegistry, gear, main,
                 new LootRoller(() -> ThreadLocalRandom.current().nextDouble()), getLogger());
         DamagePipeline pipeline = new DamagePipeline(() -> ThreadLocalRandom.current().nextDouble());
         backups = new BackupService(db, getDataFolder().toPath().resolve("backups"), getLogger());
 
         CombatListener combatListener = new CombatListener(profiles, mobs, rewards, display, combat, pipeline, main);
         getServer().getPluginManager().registerEvents(combatListener, this);
+        SidebarService sidebar = new SidebarService();
         getServer().getPluginManager().registerEvents(
-                new PlayerListener(profiles, rewards, mobs, gear, display, combat, combatListener, main), this);
+                new PlayerListener(profiles, rewards, mobs, gear, display, combat, combatListener, main, sidebar), this);
+        getServer().getPluginManager().registerEvents(new ClaimLockListener(gear), this);
+        getServer().getPluginManager().registerEvents(new VanillaGuardListener(gear, mobs), this);
 
         RpgCommand rpg = new RpgCommand(profiles, rewards);
         Objects.requireNonNull(getCommand("rpg")).setExecutor(rpg);
@@ -69,7 +75,7 @@ public final class RpgPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("rpgadmin")).setExecutor(admin);
         Objects.requireNonNull(getCommand("rpgadmin")).setTabCompleter(admin);
 
-        Bukkit.getScheduler().runTaskTimer(this, new HudTask(profiles, mobs, display, combat, keys), SECOND, SECOND);
+        Bukkit.getScheduler().runTaskTimer(this, new HudTask(profiles, mobs, display, combat, keys, sidebar), SECOND, SECOND);
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             profiles.saveDirty();
             profiles.purgeRecent(5 * 60_000L);

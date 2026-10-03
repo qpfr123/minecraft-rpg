@@ -37,9 +37,12 @@ public final class PlayerListener implements Listener {
     private final CombatStateTracker combat;
     private final CombatListener combatListener;
     private final MainThread main;
+    private final SidebarService sidebar;
 
     public PlayerListener(ProfileService profiles, RewardService rewards, MobService mobs, GearItems gear,
-                          HealthDisplay display, CombatStateTracker combat, CombatListener combatListener, MainThread main) {
+                          HealthDisplay display, CombatStateTracker combat, CombatListener combatListener, MainThread main,
+                          SidebarService sidebar) {
+        this.sidebar = sidebar;
         this.profiles = profiles;
         this.rewards = rewards;
         this.mobs = mobs;
@@ -73,7 +76,7 @@ public final class PlayerListener implements Listener {
         }
         PlayerProfile profile = loaded.profile();
         StatSnapshot stats = profiles.stats(player);
-        if (profile.version() == 0) {
+        if (profile.latestVersion() == 0) { // DB에 한 번도 저장된 적 없는 새 프로필
             profile.setHp(stats.maxHp());
             profile.setMp(stats.maxMp());
             player.sendMessage(Component.text("Minecraft RPG에 오신 것을 환영합니다. /rpg stats 로 포인트 10점을 배분하세요.", NamedTextColor.GOLD));
@@ -91,6 +94,7 @@ public final class PlayerListener implements Listener {
         combat.forget(id);
         combatListener.forget(id);
         display.forget(id);
+        sidebar.forget(id);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -125,6 +129,10 @@ public final class PlayerListener implements Listener {
         if (def == null || def.slot() != GearSlot.CONSUMABLE) return;
         event.setCancelled(true);
         Player player = event.getPlayer();
+        if (gear.isLocked(item)) {
+            player.sendActionBar(Component.text("보상 확정 중인 아이템은 아직 쓸 수 없습니다.", NamedTextColor.YELLOW));
+            return;
+        }
         profiles.get(player.getUniqueId()).ifPresent(p -> {
             if (p.hp() <= 0) return;
             StatSnapshot stats = profiles.stats(player);

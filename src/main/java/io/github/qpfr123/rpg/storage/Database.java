@@ -25,7 +25,23 @@ import java.util.UUID;
  * SQLite 저장소. 스레드 안전하지 않으므로 {@link DbExecutor}의 단일 스레드에서만 호출한다(테스트는 직접 호출).
  */
 public final class Database implements AutoCloseable {
+    /** 장애 주입 지점(테스트·관리자 검증용). */
+    public enum FaultPoint { SAVE_PROFILE, RECORD_REWARD, TRANSITION, COMPLETE_CLAIM }
+
     private final Connection conn;
+    private final Map<FaultPoint, java.util.concurrent.atomic.AtomicInteger> faults = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 다음 count번의 해당 쓰기를 실패시킨다. */
+    public void injectFailures(FaultPoint point, int count) {
+        faults.put(point, new java.util.concurrent.atomic.AtomicInteger(count));
+    }
+
+    private void maybeFail(FaultPoint point) throws SQLException {
+        var left = faults.get(point);
+        if (left != null && left.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+            throw new SQLException("injected failure at " + point);
+        }
+    }
 
     public Database(Path file) throws SQLException {
         try {
@@ -93,6 +109,7 @@ public final class Database implements AutoCloseable {
 
     /** @throws StaleVersionException DB의 버전이 기대값과 다를 때. */
     public void saveProfile(PlayerProfile.Snapshot s) throws SQLException {
+        maybeFail(FaultPoint.SAVE_PROFILE);
         inTransaction(() -> saveProfileNoTx(s));
     }
 
@@ -150,6 +167,7 @@ public final class Database implements AutoCloseable {
      * EXP는 프로필 스냅샷에 이미 반영돼 있어야 한다.
      */
     public boolean recordReward(RewardGrant grant, PlayerProfile.Snapshot recipientProfile) throws SQLException {
+        maybeFail(FaultPoint.RECORD_REWARD);
         try {
             inTransaction(() -> {
                 insertReward(grant);
@@ -181,6 +199,11 @@ public final class Database implements AutoCloseable {
 
     /** 상태 전이. from 상태일 때만 바뀐다. @return 바뀌었는지 여부. */
     public boolean transition(String eventId, UUID recipient, RewardGrant.Status from, RewardGrant.Status to) throws SQLException {
+        maybeFail(FaultPoint.TRANSITION);
+        return transitionNoFault(eventId, recipient, from, to);
+    }
+
+    private boolean transitionNoFault(String eventId, UUID recipient, RewardGrant.Status from, RewardGrant.Status to) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
                 "UPDATE reward_ledger SET status=?, updated_at=? WHERE event_id=? AND recipient=? AND status=?")) {
             ps.setString(1, to.name());
@@ -194,18 +217,28 @@ public final class Database implements AutoCloseable {
 
     /**
      * 수령 완료: CLAIMING → CLAIMED 전이와 EXP가 반영된 프로필 저장을 한 트랜잭션으로 묶는다.
-     * @return 전이에 성공했는지 여부. 실패하면 프로필도 저장하지 않는다.
+     * @return 전이했으면 true. 보상이 CLAIMING이 아니면 아무것도 바꾸지 않고 false.
+     * @throws SQLException 쓰기 실패(전부 롤백) — 호출자는 같은 내용으로 다시 시도한다.
      */
     public boolean completeClaim(String eventId, UUID recipient, PlayerProfile.Snapshot profile) throws SQLException {
+        maybeFail(FaultPoint.COMPLETE_CLAIM);
         boolean[] ok = {false};
         inTransaction(() -> {
-            if (!transition(eventId, recipient, RewardGrant.Status.CLAIMING, RewardGrant.Status.CLAIMED)) {
-                throw new SQLException("reward not in CLAIMING: " + eventId + " / " + recipient);
-            }
+            if (!transitionNoFault(eventId, recipient, RewardGrant.Status.CLAIMING, RewardGrant.Status.CLAIMED)) return;
             saveProfileNoTx(profile);
             ok[0] = true;
         });
         return ok[0];
+    }
+
+    public Optional<RewardGrant.Status> rewardStatus(String eventId, UUID recipient) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT status FROM reward_ledger WHERE event_id=? AND recipient=?")) {
+            ps.setString(1, eventId);
+            ps.setString(2, recipient.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(RewardGrant.Status.valueOf(rs.getString(1))) : Optional.empty();
+            }
+        }
     }
 
     /** 수령하지 않은 보상(PENDING, CLAIMING). */

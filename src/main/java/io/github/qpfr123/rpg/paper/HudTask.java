@@ -22,8 +22,11 @@ public final class HudTask implements Runnable {
     private final HealthDisplay display;
     private final CombatStateTracker combat;
     private final Keys keys;
+    private final SidebarService sidebar;
 
-    public HudTask(ProfileService profiles, MobService mobs, HealthDisplay display, CombatStateTracker combat, Keys keys) {
+    public HudTask(ProfileService profiles, MobService mobs, HealthDisplay display, CombatStateTracker combat, Keys keys,
+                   SidebarService sidebar) {
+        this.sidebar = sidebar;
         this.profiles = profiles;
         this.mobs = mobs;
         this.display = display;
@@ -45,6 +48,7 @@ public final class HudTask implements Runnable {
             applyMoveSpeed(player, s.moveSpeedMultiplier());
             display.sync(player, p, s.maxHp());
             player.sendActionBar(actionBar(p, s, inCombat));
+            sidebar.update(player, p, s);
         }
         mobs.tickBossBars();
     }

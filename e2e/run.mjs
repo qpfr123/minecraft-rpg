@@ -27,7 +27,7 @@ async function profile(name) {
 
 async function ledger(name) {
   const lines = await server.collect(`rpgadmin ledger ${name}`, 1200);
-  return lines.map((l) => l.match(/(PENDING|CLAIMING|CLAIMED) (kill:\S+) EXP (\d+) \[(.*)\]/)).filter(Boolean)
+  return lines.map((l) => l.match(/(PENDING|CLAIMING|CLAIMED) ((?:kill|test):\S+) EXP (\d+) \[(.*)\]/)).filter(Boolean)
     .map((m) => ({ status: m[1], event: m[2], exp: +m[3], gear: m[4] ? m[4].split(', ') : [] }));
 }
 
@@ -234,6 +234,113 @@ async function main() {
     offline.level === beforeQuit.level && offline.exp === beforeQuit.exp && JSON.stringify(afterJoin.alloc) === JSON.stringify(beforeQuit.alloc)
     && afterJoin.level === beforeQuit.level, `before=${JSON.stringify(beforeQuit)} db=${JSON.stringify(offline)}`);
 
+  // 10-1. 사이드바 표시
+  const sbObj = Object.values(a.scoreboards || {}).find((x) => x.name === 'minecraftrpg');
+  const sbLines = Object.entries(a.rawScores).filter(([k]) => k.startsWith('minecraftrpg/')).map(([, p]) => JSON.stringify(p));
+  check('사이드바 스코어보드 표시(레벨·HP 줄)', !!sbObj && sbLines.some((l) => l.includes('Lv ')) && sbLines.some((l) => l.includes('HP ')),
+    `objective=${!!sbObj} lines=${sbLines.length}`);
+
+  // 10-2. 해골 궁수의 실제 화살 피해(AI 켜짐, bot_b 장비 없음 → DEF 0, ATK 10)
+  await placeBots(a, b);
+  server.cmd('effect clear bot_b');
+  server.cmd('tp bot_b 20.5 -60 0.5 90 0');
+  await sleep(3000);
+  const bHp0 = (await profile('bot_b')).hp;
+  const archerLine = await server.query('rpgadmin spawn bone_archer bot_b', /소환: .* ([0-9a-f-]{36})/);
+  const archer = archerLine.match(/([0-9a-f-]{36})/)[1];
+  server.cmd(`tp ${archer} 26.5 -60 0.5`);
+  let arrowDelta = 0;
+  for (let i = 0; i < 60 && arrowDelta === 0; i++) {
+    await sleep(250);
+    const h = (await profile('bot_b')).hp;
+    if (h < bHp0 - 0.01) arrowDelta = bHp0 - h;
+  }
+  server.cmd(`kill ${archer}`);
+  check('해골 궁수 화살: RPG 공격으로 ATK 10 피해', Math.abs(arrowDelta - 10) < 0.6, `maxHp=${bHp0} delta=${arrowDelta.toFixed(2)}`);
+  await placeBots(a, b);
+
+  // 10-3. 완료 커밋 실패 중 잠금·재시도·알림은 커밋 후 한 번
+  {
+    for (const it of a.inventory.items().filter((x) => x.name === 'honey_bottle')) { try { await a.tossStack(it); } catch {} }
+    await sleep(800);
+    const p0 = await profile('bot_a');
+    const tonic0 = countItem(a, 'honey_bottle');
+    server.cmd('rpgadmin dbfail complete 2');
+    const from4 = a.chatLog.length;
+    server.cmd('rpgadmin testgrant bot_a 40 shield_tonic');
+    await sleep(1500);
+    const tonicLocked = countItem(a, 'honey_bottle');
+    const earlyMsg = a.chatLog.slice(from4).some((m) => /보상 수령|처치 보상/.test(m));
+    const it = a.inventory.items().find((x) => x.name === 'honey_bottle');
+    if (it) { try { await a.tossStack(it); } catch {} }
+    await sleep(1000);
+    check('완료 커밋 전: 아이템은 들어왔지만 성공 알림 없음', tonicLocked === tonic0 + 1 && !earlyMsg, `tonic ${tonic0}→${tonicLocked}, early=${earlyMsg}`);
+    check('완료 커밋 전: 잠긴 아이템은 버릴 수 없음', countItem(a, 'honey_bottle') === tonic0 + 1, `count=${countItem(a, 'honey_bottle')}`);
+    a.chat('/rpg alloc 민첩 1'); // 일반 저장은 완료 커밋까지 미뤄짐
+    await waitChat(a, /보상 수령/, 30_000, from4).catch(() => null);
+    await sleep(1000);
+    const msgs = a.chatLog.slice(from4).filter((m) => /보상 수령/.test(m)).length;
+    const p1 = await profile('bot_a');
+    const exp = addExp(p0.level, p0.exp, 40);
+    const rows = (await ledger('bot_a')).filter((r) => r.event.startsWith('test:'));
+    check('완료 재시도 후 CLAIMED, 알림 1번, EXP 40 한 번', msgs === 1 && rows[0]?.status === 'CLAIMED'
+      && p1.level === exp.level && p1.exp === exp.exp, `msgs=${msgs} rows=${JSON.stringify(rows.slice(0, 1))} ${p0.level}/${p0.exp}→${p1.level}/${p1.exp}`);
+    const it2 = a.inventory.items().find((x) => x.name === 'honey_bottle');
+    if (it2) { try { await a.toss(it2.type, null, 1); } catch {} }
+    await sleep(1000);
+    check('완료 커밋 후 잠금 해제(버릴 수 있음)', countItem(a, 'honey_bottle') === tonic0, `count=${countItem(a, 'honey_bottle')}`);
+    await quit(a);
+    await sleep(1500);
+    const dbA = await profile('bot_a');
+    check('미뤄 둔 저장 포함 DB 반영(배분+EXP)', dbA.alloc['민첩'] === (p0.alloc['민첩'] || 0) + 1 && dbA.level === exp.level && dbA.exp === exp.exp, JSON.stringify(dbA));
+    a = await connectBot('bot_a', PORT, { respawn: false });
+  }
+
+  // 10-4. 일반 저장 실패 후 재저장
+  {
+    const p0 = await profile('bot_a');
+    server.cmd('rpgadmin dbfail save 2');
+    for (let i = 0; i < 3; i++) { a.chat('/rpg alloc 정신 1'); await sleep(700); }
+    await sleep(1000);
+    await quit(a);
+    await sleep(1500);
+    const dbA = await profile('bot_a');
+    check('저장 2번 실패 후 다음 저장에서 전부 반영', dbA.alloc['정신'] === (p0.alloc['정신'] || 0) + 3, `정신 ${p0.alloc['정신']}→${dbA.alloc['정신']}`);
+    const stale = server.all.filter((l) => /stale profile version/.test(l));
+    check('버전 충돌 없이 수렴', stale.length === 0, stale.slice(0, 2).join(' | '));
+    a = await connectBot('bot_a', PORT, { respawn: false });
+  }
+
+  // 10-5. 완료 커밋 전 강제 종료 + 일부 아이템만 남은 복구
+  {
+    await holdItem(a, 'iron_sword');
+    const p0 = await profile('bot_a');
+    const blade0 = countItem(a, 'iron_sword');
+    const tonic0 = countItem(a, 'honey_bottle');
+    server.cmd('rpgadmin dbfail complete 1000');
+    server.cmd('rpgadmin testgrant bot_a 60 shield_tonic ghoul_blade');
+    await sleep(2000);
+    check('지급됨(완료 미확정)', countItem(a, 'iron_sword') === blade0 + 1 && countItem(a, 'honey_bottle') === tonic0 + 1);
+    server.cmd('clear bot_a minecraft:honey_bottle 1'); // 관리자 삭제로 일부만 남은 상태를 만든다
+    server.cmd('save-all');
+    await server.waitFor(/Saved the game/, 15_000);
+    server.proc.kill('SIGKILL');
+    await server.exit;
+    await quit(a); await quit(b);
+    await server.start();
+    a = await connectBot('bot_a', PORT, { respawn: false });
+    b = await connectBot('bot_b', PORT);
+    await sleep(3000);
+    const rows = (await ledger('bot_a')).filter((r) => r.event.startsWith('test:') && r.exp === 60);
+    const p1 = await profile('bot_a');
+    const exp = addExp(p0.level, p0.exp, 60);
+    check('[일부 남음] 복구 후 CLAIMED, EXP 60 한 번', rows.length === 1 && rows[0].status === 'CLAIMED' && p1.level === exp.level && p1.exp === exp.exp,
+      `${JSON.stringify(rows)} ${p0.level}/${p0.exp}→${p1.level}/${p1.exp}`);
+    check('[일부 남음] 없는 아이템을 다시 주지 않음', countItem(a, 'iron_sword') === blade0 + 1 && countItem(a, 'honey_bottle') === tonic0,
+      `blade ${blade0}→${countItem(a, 'iron_sword')} tonic ${tonic0}→${countItem(a, 'honey_bottle')}`);
+    check('[일부 남음] 관리자 확인용 경고 로그', server.all.some((l) => /only 1\/2 delivered items found/.test(l)));
+  }
+
   // 11. 지급 중 강제 종료 — 플레이어 데이터 저장 후, CLAIMED 커밋 전
   for (const [mode, label] of [['claim', '저장 후'], ['claim-nosave', '저장 전']]) {
     await holdItem(a, 'iron_sword');
@@ -288,7 +395,7 @@ async function main() {
     && JSON.stringify(restored.alloc) === JSON.stringify(atBackup.alloc), `backup=${atBackup.level}/${JSON.stringify(atBackup.alloc)} restored=${restored.level}/${JSON.stringify(restored.alloc)}`);
 
   await server.stop();
-  const severe = server.lines.filter((l) => /ERROR|SEVERE/.test(l) && /MinecraftRPG|io\.github\.qpfr123/.test(l) && !/crash-test/.test(l));
+  const severe = server.all.filter((l) => /ERROR|SEVERE/.test(l) && /MinecraftRPG|io\.github\.qpfr123/.test(l) && !/crash-test|injected failure|DB task failed: (save|complete)/.test(l));
   check('플러그인 ERROR/SEVERE 로그 없음(강제 종료 테스트 로그 제외)', severe.length === 0, severe.slice(0, 3).join(' | '));
 }
 

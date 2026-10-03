@@ -10,7 +10,7 @@ commands:
     permission: minecraftrpg.player
   rpgadmin:
     description: RPG 관리자 조회·테스트
-    usage: /rpgadmin profile|ledger <플레이어>, spawn <몹> [플레이어], backup, level <플레이어> <레벨>, givegear <플레이어> <장비>, crashtest <claim|claim-nosave>
+    usage: /rpgadmin profile|ledger <플레이어>, spawn <몹> [플레이어], backup, level, givegear, testgrant, dbfail, crashtest
     permission: minecraftrpg.admin
 permissions:
   minecraftrpg.player:

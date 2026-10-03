@@ -33,8 +33,11 @@ public final class ProfileService {
 
     private record Recent(PlayerProfile profile, long at) {}
 
-    public ProfileService(DbExecutor db, GearItems gear, Logger log) {
+    private final MainThread main;
+
+    public ProfileService(DbExecutor db, GearItems gear, MainThread main, Logger log) {
         this.db = db;
+        this.main = main;
         this.gear = gear;
         this.log = log;
     }
@@ -51,7 +54,7 @@ public final class ProfileService {
         Loaded l = preloaded.remove(id);
         if (l == null) return null;
         Recent r = recent.remove(id);
-        if (r != null && r.profile().version() > l.profile().version()) {
+        if (r != null && r.profile().latestVersion() >= l.profile().version()) {
             l = new Loaded(r.profile(), l.openRewards()); // 메모리의 최신 상태가 권위
         }
         online.put(id, l.profile());
@@ -76,17 +79,31 @@ public final class ProfileService {
         return StatCalculator.compute(require(p).allocation(), gear.equippedBonuses(p));
     }
 
+    /**
+     * 비동기 저장. 결과는 메인 스레드에서 프로필 버전 상태에 반영한다. 보상 수령 완료가 커밋되기 전에는
+     * 일반 저장을 미룬다(완료 트랜잭션이 프로필을 함께 저장하므로, 그 전에 EXP만 따로 저장되면 복구 시 이중 반영된다).
+     */
     public CompletableFuture<Void> save(PlayerProfile profile) {
+        if (profile.completionPending()) return CompletableFuture.completedFuture(null);
         PlayerProfile.Snapshot s = profile.snapshot();
-        return db.submit("save " + s.id(), d -> {
+        CompletableFuture<Void> f = db.submit("save " + s.id(), d -> {
             d.saveProfile(s);
             return null;
         });
+        f.whenComplete((v, e) -> main.nextTick(() -> {
+            if (e == null) profile.onSaved(s);
+            else profile.onSaveFailed(s);
+        }));
+        return f;
     }
 
+    /** 접속 중이거나 방금 나간 프로필 중 저장되지 않은 변경이 있는 것을 저장(실패한 저장의 재시도 포함). */
     public void saveDirty() {
         for (PlayerProfile p : online.values()) {
             if (p.dirty()) save(p);
+        }
+        for (Recent r : recent.values()) {
+            if (r.profile().dirty()) save(r.profile());
         }
     }
 
@@ -98,14 +115,18 @@ public final class ProfileService {
         }
     }
 
+    /** 오래됐고 저장이 끝난 퇴장 프로필만 버린다. */
     public void purgeRecent(long olderThanMillis) {
         long cutoff = System.currentTimeMillis() - olderThanMillis;
-        recent.values().removeIf(r -> r.at() < cutoff);
-        // 사전 로드 후 입장하지 못한 항목도 정리
+        recent.values().removeIf(r -> r.at() < cutoff && !r.profile().dirty() && !r.profile().completionPending());
     }
 
+    /** 종료 시: 미뤄 둔 것을 제외한 전부 저장. 수령 완료가 커밋되지 않은 프로필은 다음 입장 때 복구 절차가 처리한다. */
     public void saveAll() {
         for (PlayerProfile p : online.values()) save(p);
+        for (Recent r : recent.values()) {
+            if (r.profile().dirty()) save(r.profile());
+        }
     }
 
     public Logger log() {

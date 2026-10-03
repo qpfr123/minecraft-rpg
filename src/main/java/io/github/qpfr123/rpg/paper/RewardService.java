@@ -14,24 +14,40 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.Plugin;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
  * 보상 생성과 수령.
  * <pre>
  * 처치 확정 → 원장에 PENDING 생성(이벤트ID+수령자 유일)
- * 수령: PENDING→CLAIMING(DB 커밋) → 아이템 지급 + 플레이어 데이터 저장 → EXP 반영 → [CLAIMING→CLAIMED + 프로필 저장] 한 트랜잭션
- * 복구(입장 시 CLAIMING 발견): 인벤토리·엔더상자에서 인스턴스 ID를 찾으면 지급된 것으로 보고 완료 처리, 없으면 PENDING으로 되돌림
+ * 수령: PENDING→CLAIMING 커밋 → 아이템 지급(잠금 표식) + 플레이어 데이터 저장
+ *       → EXP 반영 → [CLAIMING→CLAIMED + 프로필 저장] 한 트랜잭션 → 커밋 확인 후 잠금 해제·알림
+ * 복구(입장 시 CLAIMING 발견): 잠긴 아이템이 인벤토리·엔더상자에 있으면 지급된 것으로 보고 완료, 없으면 PENDING
  * </pre>
- * EXP는 CLAIMED 트랜잭션에서만 영속되므로 아이템과 EXP 모두 정확히 한 번 반영된다.
+ * 정확히 한 번을 지키는 장치:
+ * <ul>
+ *   <li>잠긴 아이템은 확정 전까지 인벤토리 밖으로 옮기거나 버리거나 쓰지 못한다({@link ClaimLockListener}).
+ *       그래서 "지급됐는데 인벤토리에 없다"는 상황이 생기지 않는다.</li>
+ *   <li>아이템은 한 번의 지급·저장으로 함께 들어가므로, 복구 때 일부만 있어도(관리자 삭제 등) 지급된 것으로 본다.
+ *       없는 아이템을 다시 주지 않는다.</li>
+ *   <li>EXP는 CLAIMED 트랜잭션으로만 영속된다. 완료가 커밋될 때까지 그 플레이어의 일반 저장을 미룬다.
+ *       완료 쓰기가 실패하면 같은 내용으로 재시도하며, 성공 알림은 커밋 후에만 보낸다.</li>
+ * </ul>
  */
 public final class RewardService {
+    /** 테스트용 강제 종료 지점. */
+    public enum CrashPoint { NONE, AFTER_SAVE, BEFORE_SAVE }
+
+    private static final long RETRY_TICKS_MIN = 5 * 20L;
+    private static final long RETRY_TICKS_MAX = 30 * 20L;
+
+    private final Plugin plugin;
     private final DbExecutor db;
     private final ProfileService profiles;
     private final GearRegistry gearRegistry;
@@ -40,13 +56,11 @@ public final class RewardService {
     private final LootRoller roller;
     private final Logger log;
     private final Set<String> inFlight = new HashSet<>();
-    /** 테스트용 강제 종료 지점. */
-    public enum CrashPoint { NONE, AFTER_SAVE, BEFORE_SAVE }
-
     private volatile CrashPoint crashPoint = CrashPoint.NONE;
 
-    public RewardService(DbExecutor db, ProfileService profiles, GearRegistry gearRegistry, GearItems gearItems,
+    public RewardService(Plugin plugin, DbExecutor db, ProfileService profiles, GearRegistry gearRegistry, GearItems gearItems,
                          MainThread main, LootRoller roller, Logger log) {
+        this.plugin = plugin;
         this.db = db;
         this.profiles = profiles;
         this.gearRegistry = gearRegistry;
@@ -64,10 +78,13 @@ public final class RewardService {
         crashPoint = point;
     }
 
+    static String key(RewardGrant g) {
+        return g.eventId() + "|" + g.recipient();
+    }
+
     /** 처치 확정 후 수령자별 보상을 굴려 원장에 기록하고, 접속 중이면 바로 수령을 시도한다. */
     public void onKill(UUID mobEntity, MobStatProfile mob, List<UUID> recipients) {
         String eventId = "kill:" + mobEntity;
-        long now = System.currentTimeMillis();
         for (UUID recipient : recipients) {
             Player player = Bukkit.getPlayer(recipient);
             double dropBonus = 0;
@@ -79,47 +96,56 @@ public final class RewardService {
             }
             List<String> items = roller.roll(mob.loot(), dropBonus);
             long exp = ExperienceCurve.applyBonus(mob.loot().exp(), expBonus);
-            RewardGrant grant = new RewardGrant(eventId, recipient, exp, items, RewardGrant.Status.PENDING, now);
-            main.then(db.submit("record " + eventId, d -> d.recordReward(grant, null)), created -> {
-                if (!created) {
-                    log.warning("duplicate reward ignored: " + eventId + " / " + recipient);
-                    return;
-                }
-                Player online = Bukkit.getPlayer(recipient);
-                if (online != null) claim(online, grant, true);
-            });
+            record(new RewardGrant(eventId, recipient, exp, items, RewardGrant.Status.PENDING, System.currentTimeMillis()), true, true);
         }
+    }
+
+    /** 관리자 검증용 보상(이벤트 ID "test:..."). 처치 보상과 같은 경로로 기록·수령한다. */
+    public void grantTest(Player player, long exp, List<String> gearIds) {
+        record(new RewardGrant("test:" + UUID.randomUUID(), player.getUniqueId(), exp, gearIds,
+                RewardGrant.Status.PENDING, System.currentTimeMillis()), true, false);
+    }
+
+    private void record(RewardGrant grant, boolean claimNow, boolean fromKill) {
+        main.then(db.submit("record " + key(grant), d -> d.recordReward(grant, null)), created -> {
+            if (!created) {
+                log.warning("duplicate reward ignored: " + key(grant));
+                return;
+            }
+            Player online = Bukkit.getPlayer(grant.recipient());
+            if (claimNow && online != null) claim(online, grant, fromKill);
+        });
     }
 
     /** 보상함 전체 수령. */
     public void claimAll(Player player) {
         main.then(db.submit("open rewards", d -> d.openRewards(player.getUniqueId())), grants -> {
-            if (grants.isEmpty()) {
+            List<RewardGrant> pending = grants.stream().filter(g -> g.status() == RewardGrant.Status.PENDING).toList();
+            if (pending.isEmpty()) {
                 player.sendMessage(Component.text("보상함이 비어 있습니다.", NamedTextColor.GRAY));
                 return;
             }
-            for (RewardGrant g : grants) {
-                if (g.status() == RewardGrant.Status.PENDING) claim(player, g, false);
-            }
+            for (RewardGrant g : pending) claim(player, g, false);
         });
     }
 
     private void claim(Player player, RewardGrant grant, boolean fromKill) {
-        String key = grant.eventId() + "|" + grant.recipient();
+        String key = key(grant);
         if (!inFlight.add(key)) return;
         if (GearItems.freeSlots(player) < grant.gearIds().size()) {
             inFlight.remove(key);
             player.sendMessage(Component.text("인벤토리 공간이 부족해 보상이 보상함에 보관됐습니다. /rpg claim 으로 받으세요.", NamedTextColor.YELLOW));
             return;
         }
-        main.then(db.submit("claiming " + key, d -> d.transition(grant.eventId(), grant.recipient(),
-                RewardGrant.Status.PENDING, RewardGrant.Status.CLAIMING)), ok -> {
-            if (!ok) {
+        db.submit("claiming " + key, d -> d.transition(grant.eventId(), grant.recipient(),
+                RewardGrant.Status.PENDING, RewardGrant.Status.CLAIMING)).whenComplete((ok, error) -> main.nextTick(() -> {
+            if (error != null || !ok) { // 쓰기 실패 또는 이미 다른 경로에서 처리 중: 아무것도 지급하지 않음
                 inFlight.remove(key);
+                if (error != null) player.sendMessage(Component.text("보상 수령에 실패했습니다. 잠시 후 /rpg claim 으로 다시 시도하세요.", NamedTextColor.RED));
                 return;
             }
-            if (!player.isOnline() || profiles.get(player.getUniqueId()).isEmpty()
-                    || GearItems.freeSlots(player) < grant.gearIds().size()) {
+            PlayerProfile profile = profiles.get(player.getUniqueId()).orElse(null);
+            if (!player.isOnline() || profile == null || GearItems.freeSlots(player) < grant.gearIds().size()) {
                 revert(grant, key);
                 return;
             }
@@ -130,13 +156,15 @@ public final class RewardService {
                     continue;
                 }
                 ItemStack item = gearItems.create(def, grant.instanceId(i));
-                player.getInventory().addItem(item);
+                gearItems.markPending(item, key);
+                var leftover = player.getInventory().addItem(item);
+                if (!leftover.isEmpty()) log.severe("inventory overflow while delivering " + key); // 사전 검사로 생기지 않아야 함
             }
             haltIf(CrashPoint.BEFORE_SAVE, key);
             player.saveData();
             haltIf(CrashPoint.AFTER_SAVE, key);
-            complete(player, grant, key, fromKill);
-        });
+            beginCompletion(player.getUniqueId(), profile, grant, fromKill);
+        }));
     }
 
     private void haltIf(CrashPoint point, String key) {
@@ -145,20 +173,51 @@ public final class RewardService {
         Runtime.getRuntime().halt(137);
     }
 
-    private void complete(Player player, RewardGrant grant, String key, boolean fromKill) {
-        PlayerProfile profile = profiles.require(player);
-        int before = profile.level();
+    /** EXP를 메모리에 반영하고, CLAIMED 커밋이 확인될 때까지 재시도한다. */
+    private void beginCompletion(UUID playerId, PlayerProfile profile, RewardGrant grant, boolean fromKill) {
+        int levelBefore = profile.level();
         profile.addExp(grant.exp());
+        profile.beginCompletion();
+        attemptCompletion(playerId, profile, grant, fromKill, levelBefore, RETRY_TICKS_MIN);
+    }
+
+    private void attemptCompletion(UUID playerId, PlayerProfile profile, RewardGrant grant, boolean fromKill,
+                                   int levelBefore, long nextDelay) {
+        String key = key(grant);
         PlayerProfile.Snapshot snap = profile.snapshot();
         db.submit("complete " + key, d -> d.completeClaim(grant.eventId(), grant.recipient(), snap))
-                .whenComplete((v, e) -> main.nextTick(() -> inFlight.remove(key)));
+                .whenComplete((done, error) -> main.nextTick(() -> {
+                    if (error != null) {
+                        profile.onSaveFailed(snap);
+                        log.warning("claim completion failed for " + key + ", retrying in " + nextDelay / 20 + "s");
+                        Bukkit.getScheduler().runTaskLater(plugin, () -> attemptCompletion(playerId, profile, grant, fromKill,
+                                levelBefore, Math.min(RETRY_TICKS_MAX, nextDelay * 2)), nextDelay);
+                        return;
+                    }
+                    profile.endCompletion();
+                    inFlight.remove(key);
+                    if (!done) {
+                        // CLAIMING이 아니었다: 다른 경로가 이미 끝냈거나 상태가 어긋났다. 이 스냅샷은 저장되지 않았다.
+                        profile.onSaveFailed(snap);
+                        log.severe("claim completion skipped, reward not in CLAIMING: " + key + " (EXP " + grant.exp() + " may need admin review)");
+                        return;
+                    }
+                    profile.onSaved(snap);
+                    Player player = Bukkit.getPlayer(playerId);
+                    if (player == null) return;
+                    gearItems.unlock(player, key::equals);
+                    notifyClaimed(player, grant, fromKill, levelBefore, profile.level());
+                }));
+    }
+
+    private void notifyClaimed(Player player, RewardGrant grant, boolean fromKill, int levelBefore, int levelAfter) {
         StringBuilder msg = new StringBuilder("+").append(grant.exp()).append(" EXP");
         for (String id : grant.gearIds()) {
             gearRegistry.get(id).ifPresent(g -> msg.append(", ").append(g.displayName()));
         }
         player.sendMessage(Component.text((fromKill ? "처치 보상: " : "보상 수령: ") + msg, NamedTextColor.GREEN));
-        if (profile.level() > before) {
-            player.sendMessage(Component.text("레벨 업! Lv " + profile.level() + " — /rpg stats 로 포인트를 배분하세요.", NamedTextColor.GOLD));
+        if (levelAfter > levelBefore) {
+            player.sendMessage(Component.text("레벨 업! Lv " + levelAfter + " — /rpg stats 로 포인트를 배분하세요.", NamedTextColor.GOLD));
         }
     }
 
@@ -168,34 +227,43 @@ public final class RewardService {
                 .whenComplete((v, e) -> main.nextTick(() -> inFlight.remove(key)));
     }
 
-    /** 입장 직후 호출: 지급 도중 종료로 CLAIMING에 남은 보상을 대조해 정리하고, 남은 PENDING을 알린다. */
+    /**
+     * 입장 직후 호출. CLAIMING으로 남은 보상을 인벤토리와 대조해 정리하고, 이미 확정된 보상의 잠금 표식을 푼다.
+     */
     public void recover(Player player, List<RewardGrant> open) {
+        Set<String> claimingKeys = new HashSet<>();
         int pending = 0;
         for (RewardGrant g : open) {
             if (g.status() == RewardGrant.Status.PENDING) {
                 pending++;
                 continue;
             }
-            String key = g.eventId() + "|" + g.recipient();
+            String key = key(g);
+            claimingKeys.add(key);
+            if (!inFlight.add(key)) continue; // 이 서버 실행 중 이미 완료를 재시도하고 있음
             Set<String> ids = new HashSet<>();
             for (int i = 0; i < g.gearIds().size(); i++) ids.add(g.instanceId(i));
             long found = ids.isEmpty() ? 0 : gearItems.countInstances(player, ids);
-            inFlight.add(key);
+            PlayerProfile profile = profiles.require(player);
             if (found > 0) {
-                log.info("recovered delivered reward " + key + " (" + found + "/" + ids.size() + " items found)");
-                complete(player, g, key, false);
+                if (found < ids.size()) {
+                    log.warning("reward " + key + ": only " + found + "/" + ids.size()
+                            + " delivered items found; treating as delivered (no re-delivery), check admin removals");
+                } else {
+                    log.info("recovered delivered reward " + key + " (" + found + "/" + ids.size() + " items found)");
+                }
+                beginCompletion(player.getUniqueId(), profile, g, false);
             } else {
                 log.info("reverting undelivered reward " + key + " to PENDING");
                 pending++;
                 revert(g, key);
             }
         }
+        // CLAIMED가 커밋된 뒤 잠금 해제 전에 서버가 꺼졌던 아이템
+        int unlocked = gearItems.unlock(player, k -> !claimingKeys.contains(k) && !inFlight.contains(k));
+        if (unlocked > 0) log.info("unlocked " + unlocked + " already-claimed items for " + player.getName());
         if (pending > 0) {
             player.sendMessage(Component.text("보상함에 받지 않은 보상이 " + pending + "개 있습니다. /rpg claim", NamedTextColor.YELLOW));
         }
-    }
-
-    public void logFailure(String what, Throwable t) {
-        log.log(Level.SEVERE, what, t);
     }
 }

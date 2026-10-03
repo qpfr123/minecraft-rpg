@@ -10,6 +10,7 @@ public final class Keys {
     public final NamespacedKey mobProfile;
     public final NamespacedKey mobHp;
     public final NamespacedKey moveSpeed;
+    public final NamespacedKey pendingClaim;
 
     public Keys(Plugin plugin) {
         gearId = new NamespacedKey(plugin, "gear_id");
@@ -17,5 +18,6 @@ public final class Keys {
         mobProfile = new NamespacedKey(plugin, "mob_profile");
         mobHp = new NamespacedKey(plugin, "mob_hp");
         moveSpeed = new NamespacedKey(plugin, "agility_move_speed");
+        pendingClaim = new NamespacedKey(plugin, "pending_claim");
     }
 }

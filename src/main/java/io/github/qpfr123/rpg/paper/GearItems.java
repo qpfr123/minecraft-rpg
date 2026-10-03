@@ -77,6 +77,57 @@ public final class GearItems {
         return definitionOf(item).filter(d -> d.slot() == slot).map(GearDefinition::bonuses).orElse(StatBonuses.NONE);
     }
 
+    // ---- 수령 확정 전 잠금 ----
+
+    /** 지급했지만 DB에서 CLAIMED가 확정되지 않은 아이템 표식. 표식이 있는 동안 인벤토리 밖으로 나갈 수 없다. */
+    public void markPending(ItemStack item, String claimKey) {
+        item.editPersistentDataContainer(pdc -> pdc.set(keys.pendingClaim, PersistentDataType.STRING, claimKey));
+    }
+
+    public Optional<String> pendingClaimOf(ItemStack item) {
+        if (item == null || item.isEmpty() || !item.hasItemMeta()) return Optional.empty();
+        return Optional.ofNullable(item.getItemMeta().getPersistentDataContainer().get(keys.pendingClaim, PersistentDataType.STRING));
+    }
+
+    public boolean isLocked(ItemStack item) {
+        return pendingClaimOf(item).isPresent();
+    }
+
+    /** 표식 해제. claimKey가 null이면 모든 표식을 대상으로, 조건 함수가 true인 것만 푼다. */
+    public int unlock(Player player, java.util.function.Predicate<String> shouldUnlock) {
+        int n = unlockIn(player.getInventory(), shouldUnlock) + unlockIn(player.getEnderChest(), shouldUnlock);
+        ItemStack cursor = player.getItemOnCursor();
+        if (pendingClaimOf(cursor).filter(shouldUnlock).isPresent()) {
+            cursor.editPersistentDataContainer(pdc -> pdc.remove(keys.pendingClaim));
+            player.setItemOnCursor(cursor);
+            n++;
+        }
+        return n;
+    }
+
+    private int unlockIn(Inventory inv, java.util.function.Predicate<String> shouldUnlock) {
+        int n = 0;
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack item = contents[i];
+            if (pendingClaimOf(item).filter(shouldUnlock).isPresent()) {
+                item.editPersistentDataContainer(pdc -> pdc.remove(keys.pendingClaim));
+                inv.setItem(i, item);
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** 인벤토리·엔더상자에서 잠긴 아이템들의 수령 키. */
+    public Set<String> pendingClaimKeys(Player player) {
+        Set<String> out = new java.util.HashSet<>();
+        for (Inventory inv : List.of(player.getInventory(), player.getEnderChest())) {
+            for (ItemStack item : inv.getContents()) pendingClaimOf(item).ifPresent(out::add);
+        }
+        return out;
+    }
+
     /** 인벤토리·엔더상자에서 주어진 인스턴스 ID 중 실제로 있는 것. */
     public long countInstances(Player player, Set<String> instanceIds) {
         return countIn(player.getInventory(), instanceIds) + countIn(player.getEnderChest(), instanceIds);
